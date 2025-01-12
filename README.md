@@ -23,26 +23,26 @@
 
 你可以使用以下命令安装这些依赖项：
 
-`python train_virus_detector.py --config config.json`
+```python train_virus_detector.py --config config.json```
 
 使用方法
 配置文件
 首先，创建一个配置文件 config.json，示例如下：
 
-json`
+json```
 {
     "virus_samples_dir": "E:\\样本库\\待拉黑",
     "benign_samples_dir": "E:\\样本库\\待加入白名单",
     "features_path": "features.npy",
     "labels_path": "labels.npy",
     "model_path": "ML.pkl"
-}`
+}```
 运行脚本
 使用以下命令运行训练脚本：
 
-bash`
+bash```
 python train_virus_detector.py --config config.json
-`
+```
 参数说明`
 --config: 配置文件路径，包含样本目录和输出文件路径。
 `
