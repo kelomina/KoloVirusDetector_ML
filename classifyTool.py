@@ -5,13 +5,19 @@ import os
 import numpy as np
 import pefile
 import joblib
-from tqdm import tqdm
 from collections import Counter
 import math
 from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 
 def load_trained_model(model_path):
-    return joblib.load(model_path)
+    try:
+        model = joblib.load(model_path)
+        print(f"模型 {model_path} 加载成功")
+        return model
+    except Exception as e:
+        print(f"无法加载模型 {model_path}: {e}")
+        return None
 
 def calculate_entropy(data):
     if not data:
@@ -121,13 +127,15 @@ def extract_features(file_path):
 
 def process_file(file_path, model):
     try:
-        pe = pefile.PE(file_path)
         features = extract_features(file_path)
         if features is not None:
             prediction = model.predict([features])[0]
+            print(f"文件 {file_path} 分类结果: {'恶意软件' if prediction == 1 else '良性软件'}")
             return (file_path, "恶意软件" if prediction == 1 else "良性软件")
     except pefile.PEFormatError:
         print(f"文件 {file_path} 不是有效的 PE 文件")
+    except Exception as e:
+        print(f"处理文件 {file_path} 时发生错误: {e}")
     return None
 
 def classify_pe_files(directory, model, max_workers=None):
@@ -137,6 +145,10 @@ def classify_pe_files(directory, model, max_workers=None):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             all_files.append(file_path)
+    
+    if not all_files:
+        print(f"目录 {directory} 中没有文件")
+        return results
 
     with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count()) as executor:
         for result in tqdm(executor.map(lambda file_path: process_file(file_path, model), all_files), total=len(all_files), desc="处理文件"):
@@ -159,6 +171,9 @@ if __name__ == "__main__":
     max_workers = args.max_workers
 
     model = load_trained_model(model_path)
+    if model is None:
+        print("模型加载失败，退出程序")
+        exit(1)
 
     results = classify_pe_files(directory, model, max_workers=max_workers)
 
