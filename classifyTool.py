@@ -6,6 +6,8 @@ import numpy as np
 import pefile
 import joblib
 from tqdm import tqdm
+from collections import Counter
+import math
 
 def load_trained_model(model_path):
     return joblib.load(model_path)
