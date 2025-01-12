@@ -23,7 +23,7 @@
 
 你可以使用以下命令安装这些依赖项：
 
-```python train_virus_detector.py --config config.json```
+bash```python train_virus_detector.py --config config.json```
 
 使用方法
 配置文件
@@ -41,11 +41,9 @@ json```
 使用以下命令运行训练脚本：
 
 bash```
-python train_virus_detector.py --config config.json
-```
-参数说明`
+python train_virus_detector.py --config config.json```
+参数说明
 --config: 配置文件路径，包含样本目录和输出文件路径。
-`
 
 输出
 `features.npy: 提取的特征数据。
@@ -56,7 +54,7 @@ virus_detection_results.txt: 包含程序运行时间、模型准确率和性能
 日志记录
 程序运行过程中会生成日志信息，记录在控制台中，包括特征提取、模型训练和评估的过程。
 
-示例
+#示例
 配置文件示例
 json
 `{
@@ -67,8 +65,8 @@ json
     "model_path": "ML.pkl"
 }`
 
-运行结果示例
-`2023-10-10 12:34:56,789 - INFO - 模型 ML.pkl 加载成功
+运行结果示例`
+2023-10-10 12:34:56,789 - INFO - 模型 ML.pkl 加载成功
 2023-10-10 12:34:56,789 - INFO - 发现已存在的特征和标签文件，正在加载...
 2023-10-10 12:34:56,789 - INFO - 正在训练模型...
 2023-10-10 12:34:56,789 - INFO - 
