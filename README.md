@@ -23,48 +23,48 @@
 
 你可以使用以下命令安装这些依赖项：
 
-```bash
-pip install numpy scikit-learn lightgbm pefile joblib imbalanced-learn tqdm
+`python train_virus_detector.py --config config.json`
 
 使用方法
 配置文件
 首先，创建一个配置文件 config.json，示例如下：
 
-json
+json``
 {
     "virus_samples_dir": "E:\\样本库\\待拉黑",
     "benign_samples_dir": "E:\\样本库\\待加入白名单",
     "features_path": "features.npy",
     "labels_path": "labels.npy",
     "model_path": "ML.pkl"
-}
+}``
 运行脚本
 使用以下命令运行训练脚本：
 
-bash
+bash``
 python train_virus_detector.py --config config.json
-参数说明
---config: 配置文件路径，包含样本目录和输出文件路径。
-输出
+``
+参数说明``
+--config: 配置文件路径，包含样本目录和输出文件路径。``
+输出``
 features.npy: 提取的特征数据。
 labels.npy: 对应的标签数据。
 ML.pkl: 训练好的模型文件。
-virus_detection_results.txt: 包含程序运行时间、模型准确率和性能报告。
+virus_detection_results.txt: 包含程序运行时间、模型准确率和性能报告。``
 日志记录
 程序运行过程中会生成日志信息，记录在控制台中，包括特征提取、模型训练和评估的过程。
 
 示例
 配置文件示例
-json
+json``
 {
     "virus_samples_dir": "E:\\样本库\\待拉黑",
     "benign_samples_dir": "E:\\样本库\\待加入白名单",
     "features_path": "features.npy",
     "labels_path": "labels.npy",
     "model_path": "ML.pkl"
-}
+}``
 运行结果示例
-2023-10-10 12:34:56,789 - INFO - 模型 ML.pkl 加载成功
+``2023-10-10 12:34:56,789 - INFO - 模型 ML.pkl 加载成功
 2023-10-10 12:34:56,789 - INFO - 发现已存在的特征和标签文件，正在加载...
 2023-10-10 12:34:56,789 - INFO - 正在训练模型...
 2023-10-10 12:34:56,789 - INFO - 
@@ -75,5 +75,6 @@ Fitting 3 folds for each of 12 candidates, totalling 36 fits
 2023-10-10 12:34:56,789 - INFO - 最佳准确率: 0.95
 2023-10-10 12:34:56,789 - INFO - 程序运行完毕，总耗时：123.45 秒
 2023-10-10 12:34:56,789 - INFO - 最终模型准确率：0.95
-贡献
+``
+#贡献
 欢迎贡献代码、报告问题或提出建议。请参考 CONTRIBUTING.md 文件。
