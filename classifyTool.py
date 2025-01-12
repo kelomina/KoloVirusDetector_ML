@@ -8,6 +8,7 @@ import joblib
 from tqdm import tqdm
 from collections import Counter
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 def load_trained_model(model_path):
     return joblib.load(model_path)
@@ -118,19 +119,30 @@ def extract_features(file_path):
         print(f"无法读取文件 {file_path}: {e}")
         return None
 
-def classify_pe_files(directory, model):
+def process_file(file_path, model):
+    try:
+        pe = pefile.PE(file_path)
+        features = extract_features(file_path)
+        if features is not None:
+            prediction = model.predict([features])[0]
+            return (file_path, "恶意软件" if prediction == 1 else "良性软件")
+    except pefile.PEFormatError:
+        print(f"文件 {file_path} 不是有效的 PE 文件")
+    return None
+
+def classify_pe_files(directory, model, max_workers=None):
     results = []
+    all_files = []
     for root, _, files in os.walk(directory):
-        for file_name in tqdm(files, desc="处理文件"):
+        for file_name in files:
             file_path = os.path.join(root, file_name)
-            try:
-                pe = pefile.PE(file_path)
-                features = extract_features(file_path)
-                if features is not None:
-                    prediction = model.predict([features])[0]
-                    results.append((file_path, "恶意软件" if prediction == 1 else "良性软件"))
-            except pefile.PEFormatError:
-                print(f"文件 {file_path} 不是有效的 PE 文件")
+            all_files.append(file_path)
+
+    with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count()) as executor:
+        for result in tqdm(executor.map(lambda file_path: process_file(file_path, model), all_files), total=len(all_files), desc="处理文件"):
+            if result is not None:
+                results.append(result)
+
     return results
 
 if __name__ == "__main__":
@@ -139,14 +151,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="恶意软件检测分类器")
     parser.add_argument('--model', type=str, required=True, help="训练好的模型路径")
     parser.add_argument('--directory', type=str, required=True, help="要分类的文件目录")
+    parser.add_argument('--max_workers', type=int, default=None, help="最大工作线程数，默认为CPU核心数")
     args = parser.parse_args()
 
     model_path = args.model
     directory = args.directory
+    max_workers = args.max_workers
 
     model = load_trained_model(model_path)
 
-    results = classify_pe_files(directory, model)
+    results = classify_pe_files(directory, model, max_workers=max_workers)
 
     with open("classification_results.txt", "w", encoding="utf-8") as f:
         for file_path, classification in results:
