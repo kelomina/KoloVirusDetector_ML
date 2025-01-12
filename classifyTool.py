@@ -8,7 +8,7 @@ import joblib
 from collections import Counter
 import math
 from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm
+import time
 
 def load_trained_model(model_path):
     try:
@@ -151,7 +151,7 @@ def classify_pe_files(directory, model, max_workers=None):
         return results
 
     with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count()) as executor:
-        for result in tqdm(executor.map(lambda file_path: process_file(file_path, model), all_files), total=len(all_files), desc="处理文件"):
+        for result in executor.map(lambda file_path: process_file(file_path, model), all_files):
             if result is not None:
                 results.append(result)
 
@@ -175,10 +175,18 @@ if __name__ == "__main__":
         print("模型加载失败，退出程序")
         exit(1)
 
+    start_time = time.time()  # 记录开始时间
+
     results = classify_pe_files(directory, model, max_workers=max_workers)
+
+    end_time = time.time()  # 记录结束时间
+    total_time = end_time - start_time
+    average_time = total_time / len(results) if results else 0
 
     with open("classification_results.txt", "w", encoding="utf-8") as f:
         for file_path, classification in results:
             f.write(f"{file_path}: {classification}\n")
 
-    print("分类结果已保存到 classification_results.txt")
+    print(f"分类结果已保存到 classification_results.txt")
+    print(f"总用时: {total_time:.2f} 秒")
+    print(f"平均用时: {average_time:.2f} 秒")
