@@ -23,7 +23,7 @@
 
 你可以使用以下命令安装这些依赖项：
 
-bash```python train_virus_detector.py --config config.json```
+bash``````
 
 ##使用方法
 
