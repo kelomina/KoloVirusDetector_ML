@@ -17,10 +17,8 @@ import argparse
 import json
 from tqdm import tqdm
 
-# 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 计算数据的熵值
 def calculate_entropy(data):
     if not data:
         return 0
@@ -29,7 +27,6 @@ def calculate_entropy(data):
     entropy = -sum((count / length) * math.log2(count / length) for count in counter.values())
     return entropy
 
-# 提取PE文件的特征
 def extract_pe_features(pe):
     try:
         dos_header = pe.DOS_HEADER
@@ -56,16 +53,13 @@ def extract_pe_features(pe):
             optional_header.NumberOfRvaAndSizes
         ]
 
-        # 提取 .Text 段的二进制数据并计算其熵值
         text_section = next((section for section in pe.sections if b'.text' in section.Name), None)
         text_entropy = calculate_entropy(text_section.get_data()) if text_section else 0
         features.append(text_entropy)
 
-        # 提取 .data 段的大小
         data_section_size = next((section.Misc_VirtualSize for section in pe.sections if b'.data' in section.Name), 0)
         features.append(data_section_size)
 
-        # 提取导入表中的前32个函数名的前50字节
         imported_functions = set()
         if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
             for entry in pe.DIRECTORY_ENTRY_IMPORT:
@@ -79,7 +73,6 @@ def extract_pe_features(pe):
         function_names_feature = [byte for func_name in function_names_feature for byte in func_name.ljust(50, b'\x00')]
         features.extend(function_names_feature)
 
-        # 提取文件说明和版权信息
         description = ''
         copyright_info = ''
         if hasattr(pe, 'FileInfo'):
@@ -102,7 +95,6 @@ def extract_pe_features(pe):
         logging.error(f"无法提取 PE 特征: {e}")
         return None
 
-# 提取文件的特征
 def extract_features(file_path):
     try:
         with open(file_path, "rb") as f:
@@ -133,12 +125,10 @@ def extract_features(file_path):
         logging.error(f"无法读取文件 {file_path}: {e}")
         return None
 
-# 处理单个文件，返回其特征和标签
 def process_file(file_path, label):
     feature = extract_features(file_path)
     return (feature, label) if feature is not None else (None, None)
 
-# 创建数据集并分批处理
 def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
     virus_files = [os.path.join(virus_dir, file_name) for file_name in os.listdir(virus_dir)]
     benign_files = [os.path.join(benign_dir, file_name) for file_name in os.listdir(benign_dir)]
@@ -165,32 +155,27 @@ def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
 
     return virus_features_all, benign_features_all
 
-# 合并所有批次的特征和标签
 def merge_features_and_labels(virus_features, benign_features):
     features = virus_features + benign_features
     labels = [1] * len(virus_features) + [0] * len(benign_features)
     return np.array(features), np.array(labels)
 
-# 保存特征和标签
 def save_features_and_labels(features, labels, features_path, labels_path):
     np.save(features_path, features)
     np.save(labels_path, labels)
     logging.info(f"特征和标签已保存到 {features_path} 和 {labels_path}")
 
-# 加载特征和标签
 def load_features_and_labels(features_path, labels_path):
     features = np.load(features_path)
     labels = np.load(labels_path)
     logging.info(f"特征和标签已从 {features_path} 和 {labels_path} 加载")
     return features, labels
 
-# 数据增强
 def augment_data(X, y, n_samples=1000):
     adasyn = ADASYN(random_state=42)
     X_resampled, y_resampled = adasyn.fit_resample(X, y)
     return X_resampled, y_resampled
 
-# 训练模型
 def train_model(features, labels):
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
 
@@ -264,7 +249,6 @@ def train_model(features, labels):
 
     return best_model, best_accuracy, y_test, best_y_pred
 
-# 保存模型
 def save_model(model, output_path):
     joblib.dump(model, output_path)
     logging.info(f"模型已保存到 {output_path}")
@@ -284,22 +268,3 @@ if __name__ == "__main__":
     labels_path = config.get("labels_path", "labels.npy")
 
     start_time = time.time()
-
-    if args.mode == 'fine_tune':
-        model_path = config.get("model_path", "ML.pkl")
-        if os.path.exists(model_path):
-            model = joblib.load(model_path)
-            logging.info(f"加载现有模型 {model_path}")
-        else:
-            logging.error(f"模型文件 {model_path} 不存在，请检查路径。")
-            exit(1)
-    else:  # incremental
-        model = None
-
-    if args.mode == 'incremental':
-        if os.path.exists(features_path) and os.path.exists(labels_path):
-            logging.info("发现已存在的特征和标签文件，正在加载...")
-            features, labels = load_features_and_labels(features_path, labels_path)
-        else:
-            logging.info("未找到特征和标签文件，正在创建数据集...")
-            virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir, batch_size=256)
