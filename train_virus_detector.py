@@ -10,7 +10,7 @@ from sklearn.metrics import classification_report, accuracy_score, roc_curve, au
 import joblib
 import pefile
 import math
-from imblearn.over_sampling import ADASYN
+from imblearn.over_sampling import ADASYN, SMOTE
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import argparse
@@ -130,6 +130,13 @@ def process_file(file_path, label):
     return (feature, label) if feature is not None else (None, None)
 
 def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
+    if not os.path.exists(virus_dir):
+        logging.error(f"病毒样本目录 {virus_dir} 不存在")
+        return [], []
+    if not os.path.exists(benign_dir):
+        logging.error(f"良性样本目录 {benign_dir} 不存在")
+        return [], []
+
     virus_files = [os.path.join(virus_dir, file_name) for file_name in os.listdir(virus_dir)]
     benign_files = [os.path.join(benign_dir, file_name) for file_name in os.listdir(benign_dir)]
 
@@ -166,21 +173,32 @@ def save_features_and_labels(features, labels, features_path, labels_path):
     logging.info(f"特征和标签已保存到 {features_path} 和 {labels_path}")
 
 def load_features_and_labels(features_path, labels_path):
+    if not os.path.exists(features_path) or not os.path.exists(labels_path):
+        logging.error(f"特征或标签文件不存在: {features_path}, {labels_path}")
+        return None, None
     features = np.load(features_path)
     labels = np.load(labels_path)
     logging.info(f"特征和标签已从 {features_path} 和 {labels_path} 加载")
     return features, labels
 
 def augment_data(X, y, n_samples=1000):
-    adasyn = ADASYN(random_state=42)
-    X_resampled, y_resampled = adasyn.fit_resample(X, y)
+    adasyn = ADASYN(random_state=42, sampling_strategy='minority')
+    try:
+        X_resampled, y_resampled = adasyn.fit_resample(X, y)
+    except ValueError as e:
+        logging.error(f"ADASYN 错误: {e}")
+        logging.info("尝试使用 SMOTE 进行过采样...")
+        smote = SMOTE(random_state=42)
+        X_resampled, y_resampled = smote.fit_resample(X, y)
     return X_resampled, y_resampled
 
 def train_model(features, labels):
+    logging.info(f"数据集大小: {len(features)}")
+    logging.info(f"类别分布: {Counter(labels)}")
+
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
 
-    adasyn = ADASYN(random_state=42)
-    X_train_resampled, y_train_resampled = adasyn.fit_resample(X_train, y_train)
+    X_train_resampled, y_train_resampled = augment_data(X_train, y_train)
 
     param_grids = {
         'RandomForest': {
@@ -261,10 +279,44 @@ if __name__ == "__main__":
 
     with open(args.config, 'r') as f:
         config = json.load(f)
+        logging.info(f"配置文件内容: {config}")
 
     virus_samples_dir = config.get("virus_samples_dir", "E:\\样本库\\待拉黑")
     benign_samples_dir = config.get("benign_samples_dir", "E:\\样本库\\待加入白名单")
     features_path = config.get("features_path", "features.npy")
     labels_path = config.get("labels_path", "labels.npy")
+    model_output_path = config.get("model_output_path", "model.joblib")
 
     start_time = time.time()
+
+    if args.mode == 'incremental':
+        logging.info("增量训练模式")
+        if os.path.exists(features_path) and os.path.exists(labels_path):
+            logging.info(f"特征和标签文件已存在: {features_path}, {labels_path}")
+            features, labels = load_features_and_labels(features_path, labels_path)
+            if features is None or labels is None:
+                logging.error("无法加载特征和标签，重新生成特征和标签...")
+                virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
+                features, labels = merge_features_and_labels(virus_features, benign_features)
+                save_features_and_labels(features, labels, features_path, labels_path)
+        else:
+            virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
+            features, labels = merge_features_and_labels(virus_features, benign_features)
+            save_features_and_labels(features, labels, features_path, labels_path)
+        
+        features, labels = augment_data(features, labels)
+        model, accuracy, y_test, y_pred = train_model(features, labels)
+        save_model(model, model_output_path)
+    else:
+        logging.info("微调模式")
+        features, labels = load_features_and_labels(features_path, labels_path)
+        if features is None or labels is None:
+            logging.error("无法加载特征和标签，退出程序")
+            exit(1)
+
+        features, labels = augment_data(features, labels)
+        model, accuracy, y_test, y_pred = train_model(features, labels)
+        save_model(model, model_output_path)
+
+    end_time = time.time()
+    logging.info(f"训练完成，总耗时: {end_time - start_time:.2f} 秒")
