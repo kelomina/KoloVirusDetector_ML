@@ -10,6 +10,7 @@ import logging
 import warnings
 import argparse
 
+# 忽略特定的 FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -177,11 +178,11 @@ if __name__ == "__main__":
         logging.error("模型加载失败，退出程序")
         exit(1)
 
-    start_time = time.time()  
+    start_time = time.time()  # 记录开始时间
 
     results = classify_pe_files(directory, model, max_workers=max_workers)
 
-    end_time = time.time()  
+    end_time = time.time()  # 记录结束时间
     total_time = end_time - start_time
     average_time = total_time / len(results) if results else 0
 
