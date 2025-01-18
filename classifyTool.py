@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 import warnings
 import argparse
+import lightgbm
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 
@@ -15,8 +16,13 @@ def load_trained_model(model_path):
     try:
         model = joblib.load(model_path)
         return model
+    except FileNotFoundError:
+        print(f"模型加载失败: 模型文件未找到 - {model_path}")
+    except (OSError, IOError):
+        print(f"模型加载失败: 文件读取或格式错误 - {model_path}")
     except Exception as e:
-        return None
+        print(f"模型加载失败: 未知错误 - {str(e)}")
+    return None
 
 def calculate_entropy(data):
     if not data:
