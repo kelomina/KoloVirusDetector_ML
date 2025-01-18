@@ -6,22 +6,16 @@ from collections import Counter
 import math
 from concurrent.futures import ThreadPoolExecutor
 import time
-import logging
 import warnings
 import argparse
 
-# 忽略特定的 FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def load_trained_model(model_path):
     try:
         model = joblib.load(model_path)
-        logging.info(f"模型 {model_path} 加载成功")
         return model
     except Exception as e:
-        logging.error(f"无法加载模型 {model_path}: {e}")
         return None
 
 def calculate_entropy(data):
@@ -97,7 +91,6 @@ def extract_pe_features(pe):
 
         return features
     except Exception as e:
-        logging.error(f"无法提取 PE 特征: {e}")
         return None
 
 def extract_features(file_path):
@@ -120,14 +113,12 @@ def extract_features(file_path):
             pe = pefile.PE(file_path)
             pe_features = extract_pe_features(pe)
         except pefile.PEFormatError:
-            logging.warning(f"文件 {file_path} 不是有效的 PE 文件")
             return None
 
         selected_features = [entropy] + byte_distribution + list(first_128_bytes) + list(last_128_bytes) + pe_features
 
         return selected_features
     except Exception as e:
-        logging.error(f"无法读取文件 {file_path}: {e}")
         return None
 
 def process_file(file_path, model):
@@ -135,13 +126,13 @@ def process_file(file_path, model):
         features = extract_features(file_path)
         if features is not None:
             prediction = model.predict([features])[0]
-            logging.info(f"文件 {file_path} 分类结果: {'恶意软件' if prediction == 1 else '良性软件'}")
-            return (file_path, "恶意软件" if prediction == 1 else "良性软件")
+            return prediction
+        else:
+            return -1
     except pefile.PEFormatError:
-        logging.warning(f"文件 {file_path} 不是有效的 PE 文件")
+        return -1
     except Exception as e:
-        logging.error(f"处理文件 {file_path} 时发生错误: {e}")
-    return None
+        return -1
 
 def classify_pe_files(directory, model, max_workers=None):
     results = []
@@ -152,44 +143,59 @@ def classify_pe_files(directory, model, max_workers=None):
             all_files.append(file_path)
     
     if not all_files:
-        logging.warning(f"目录 {directory} 中没有文件")
         return results
 
     with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count()) as executor:
         for result in executor.map(lambda file_path: process_file(file_path, model), all_files):
             if result is not None:
-                results.append(result)
+                results.append((file_path, result))
 
     return results
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="恶意软件检测分类器")
     parser.add_argument('--model', type=str, required=True, help="训练好的模型路径")
-    parser.add_argument('--directory', type=str, required=True, help="要分类的文件目录")
+    parser.add_argument('--directory', type=str, default=None, help="要分类的文件目录")
+    parser.add_argument('--file', type=str, default=None, help="要分类的单个文件路径")
     parser.add_argument('--max_workers', type=int, default=None, help="最大工作线程数，默认为CPU核心数")
     args = parser.parse_args()
 
     model_path = args.model
     directory = args.directory
+    file_path = args.file
     max_workers = args.max_workers
+
+    if not (directory or file_path):
+        print("必须提供 --directory 或 --file 参数之一")
+        exit(1)
+
+    if directory and file_path:
+        print("不能同时提供 --directory 和 --file 参数")
+        exit(1)
 
     model = load_trained_model(model_path)
     if model is None:
-        logging.error("模型加载失败，退出程序")
+        print("模型加载失败，退出程序")
         exit(1)
 
-    start_time = time.time()  # 记录开始时间
+    start_time = time.time()
 
-    results = classify_pe_files(directory, model, max_workers=max_workers)
+    if file_path:
+        classification = process_file(file_path, model)
+        if classification is not None:
+            print(classification)
+        else:
+            print(-1)
+    else:
+        results = classify_pe_files(directory, model, max_workers=max_workers)
+        end_time = time.time()
+        total_time = end_time - start_time
+        average_time = total_time / len(results) if results else 0
 
-    end_time = time.time()  # 记录结束时间
-    total_time = end_time - start_time
-    average_time = total_time / len(results) if results else 0
+        with open("classification_results.txt", "w", encoding="utf-8") as f:
+            for file_path, classification in results:
+                f.write(f"{file_path}: {classification}\n")
 
-    with open("classification_results.txt", "w", encoding="utf-8") as f:
-        for file_path, classification in results:
-            f.write(f"{file_path}: {classification}\n")
-
-    logging.info(f"分类结果已保存到 classification_results.txt")
-    logging.info(f"总用时: {total_time:.2f} 秒")
-    logging.info(f"平均用时: {average_time:.2f} 秒")
+        print(f"分类结果已保存到 classification_results.txt")
+        print(f"总用时: {total_time:.2f} 秒")
+        print(f"平均用时: {average_time:.2f} 秒")
