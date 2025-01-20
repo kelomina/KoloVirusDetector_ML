@@ -2,8 +2,6 @@ import os
 import time
 import numpy as np
 from collections import Counter
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import classification_report, accuracy_score, roc_curve, auc
@@ -17,7 +15,16 @@ import argparse
 import json
 from tqdm import tqdm
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# 配置日志记录到文件和控制台
+log_file = "train_virus_detector.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
 
 def calculate_entropy(data):
     if not data:
@@ -29,9 +36,13 @@ def calculate_entropy(data):
 
 def extract_pe_features(pe):
     try:
-        dos_header = pe.DOS_HEADER
-        file_header = pe.FILE_HEADER
-        optional_header = pe.OPTIONAL_HEADER
+        dos_header = getattr(pe, 'DOS_HEADER', None)
+        file_header = getattr(pe, 'FILE_HEADER', None)
+        optional_header = getattr(pe, 'OPTIONAL_HEADER', None)
+
+        if not all([dos_header, file_header, optional_header]):
+            logging.warning("PE 文件缺少必要头信息")
+            return None
 
         features = [
             dos_header.e_magic,
@@ -130,6 +141,13 @@ def process_file(file_path, label):
     return (feature, label) if feature is not None else (None, None)
 
 def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
+    def list_files(directory):
+        file_paths = []
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                file_paths.append(os.path.join(root, file))
+        return file_paths
+
     if not os.path.exists(virus_dir):
         logging.error(f"病毒样本目录 {virus_dir} 不存在")
         return [], []
@@ -137,8 +155,8 @@ def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
         logging.error(f"良性样本目录 {benign_dir} 不存在")
         return [], []
 
-    virus_files = [os.path.join(virus_dir, file_name) for file_name in os.listdir(virus_dir)]
-    benign_files = [os.path.join(benign_dir, file_name) for file_name in os.listdir(benign_dir)]
+    virus_files = list_files(virus_dir)
+    benign_files = list_files(benign_dir)
 
     all_files = [(file_path, 1) for file_path in virus_files] + [(file_path, 0) for file_path in benign_files]
 
@@ -146,13 +164,19 @@ def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
     virus_features_all = []
     benign_features_all = []
 
+    logging.info(f"开始生成数据集，总文件数: {len(all_files)}，批处理大小: {batch_size}")
+
     for batch_idx in tqdm(range(total_batches), desc="处理批次"):
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(all_files))
         batch_files = all_files[start_idx:end_idx]
 
-        with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count()) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count() // 2) as executor:
             results = list(executor.map(lambda args: process_file(*args), batch_files))
+
+        skipped_files = [file_path for (file_path, label), result in zip(batch_files, results) if result[0] is None]
+        if skipped_files:
+            logging.warning(f"跳过文件: {skipped_files}")
 
         virus_features_batch = [feature for feature, label in results if feature is not None and label == 1]
         benign_features_batch = [feature for feature, label in results if feature is not None and label == 0]
@@ -160,11 +184,16 @@ def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
         virus_features_all.extend(virus_features_batch)
         benign_features_all.extend(benign_features_batch)
 
+        logging.info(f"批次 {batch_idx + 1}/{total_batches} 处理完成，病毒样本数: {len(virus_features_batch)}，良性样本数: {len(benign_features_batch)}")
+
+    logging.info(f"数据集生成完成，总病毒样本数: {len(virus_features_all)}，总良性样本数: {len(benign_features_all)}")
+
     return virus_features_all, benign_features_all
 
 def merge_features_and_labels(virus_features, benign_features):
     features = virus_features + benign_features
     labels = [1] * len(virus_features) + [0] * len(benign_features)
+    logging.info(f"特征和标签合并完成，总样本数: {len(features)}")
     return np.array(features), np.array(labels)
 
 def save_features_and_labels(features, labels, features_path, labels_path):
@@ -183,16 +212,22 @@ def load_features_and_labels(features_path, labels_path):
 
 def augment_data(X, y, n_samples=1000):
     adasyn = ADASYN(random_state=42, sampling_strategy='minority')
+    smote = SMOTE(random_state=42)
     try:
         X_resampled, y_resampled = adasyn.fit_resample(X, y)
+        logging.info("ADASYN 过采样完成")
     except ValueError as e:
         logging.error(f"ADASYN 错误: {e}")
-        logging.info("尝试使用 SMOTE 进行过采样...")
-        smote = SMOTE(random_state=42)
-        X_resampled, y_resampled = smote.fit_resample(X, y)
+        try:
+            X_resampled, y_resampled = smote.fit_resample(X, y)
+            logging.info("SMOTE 过采样完成")
+        except Exception as e:
+            logging.error(f"SMOTE 错误: {e}")
+            raise RuntimeError("数据增强失败，请检查输入数据")
+
     return X_resampled, y_resampled
 
-def train_model(features, labels):
+def train_model(features, labels, initial_model=None):
     logging.info(f"数据集大小: {len(features)}")
     logging.info(f"类别分布: {Counter(labels)}")
 
@@ -201,32 +236,8 @@ def train_model(features, labels):
     X_train_resampled, y_train_resampled = augment_data(X_train, y_train)
 
     param_grids = {
-        'RandomForest': {
-            'model': RandomForestClassifier(random_state=42),
-            'param_grid': {
-                'n_estimators': [100, 200],
-                'max_depth': [None, 10, 20],
-                'min_samples_split': [2, 5],
-                'min_samples_leaf': [1, 2]
-            }
-        },
-        'GradientBoosting': {
-            'model': GradientBoostingClassifier(random_state=42),
-            'param_grid': {
-                'n_estimators': [100, 200],
-                'learning_rate': [0.01, 0.1],
-                'max_depth': [3, 5, 7]
-            }
-        },
-        'LogisticRegression': {
-            'model': LogisticRegression(random_state=42),
-            'param_grid': {
-                'C': [0.1, 1, 10],
-                'solver': ['lbfgs']
-            }
-        },
         'LightGBM': {
-            'model': LGBMClassifier(random_state=42),
+            'model': initial_model if initial_model else LGBMClassifier(random_state=42),
             'param_grid': {
                 'n_estimators': [100, 200],
                 'learning_rate': [0.01, 0.1],
@@ -241,7 +252,7 @@ def train_model(features, labels):
 
     for model_name, config in param_grids.items():
         logging.info(f"\n训练 {model_name} 模型...")
-        grid_search = GridSearchCV(estimator=config['model'], param_grid=config['param_grid'], cv=3, n_jobs=-1, verbose=2)
+        grid_search = GridSearchCV(estimator=config['model'], param_grid=config['param_grid'], cv=3, n_jobs=4, verbose=2)
         grid_search.fit(X_train_resampled, y_train_resampled)
 
         best_estimator = grid_search.best_estimator_
@@ -277,9 +288,17 @@ if __name__ == "__main__":
     parser.add_argument('--mode', type=str, choices=['incremental', 'fine_tune'], default='incremental', help="训练模式：增量训练或微调")
     args = parser.parse_args()
 
+    if not os.path.exists(args.config):
+        logging.error(f"配置文件 {args.config} 不存在")
+        exit(1)
+
     with open(args.config, 'r') as f:
-        config = json.load(f)
-        logging.info(f"配置文件内容: {config}")
+        try:
+            config = json.load(f)
+            logging.info(f"配置文件内容: {config}")
+        except json.JSONDecodeError as e:
+            logging.error(f"配置文件格式错误: {e}")
+            exit(1)
 
     virus_samples_dir = config.get("virus_samples_dir", "E:\\样本库\\待拉黑")
     benign_samples_dir = config.get("benign_samples_dir", "E:\\样本库\\待加入白名单")
@@ -293,29 +312,64 @@ if __name__ == "__main__":
         logging.info("增量训练模式")
         if os.path.exists(features_path) and os.path.exists(labels_path):
             logging.info(f"特征和标签文件已存在: {features_path}, {labels_path}")
-            features, labels = load_features_and_labels(features_path, labels_path)
-            if features is None or labels is None:
+            existing_features, existing_labels = load_features_and_labels(features_path, labels_path)
+            if existing_features is None or existing_labels is None:
                 logging.error("无法加载特征和标签，重新生成特征和标签...")
-                virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
-                features, labels = merge_features_and_labels(virus_features, benign_features)
-                save_features_and_labels(features, labels, features_path, labels_path)
+                existing_features, existing_labels = [], []
         else:
-            virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
-            features, labels = merge_features_and_labels(virus_features, benign_features)
-            save_features_and_labels(features, labels, features_path, labels_path)
-        
+            existing_features, existing_labels = [], []
+
+        # 生成新的特征和标签
+        virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
+        new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
+
+        # 合并特征和标签
+        if len(existing_features) > 0 and len(existing_labels) > 0:
+            features = np.vstack((existing_features, new_features))
+            labels = np.concatenate((existing_labels, new_labels))
+        else:
+            features = new_features
+            labels = new_labels
+
+        logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
+
+        # 保存合并后的特征和标签
+        save_features_and_labels(features, labels, features_path, labels_path)
+
+        # 继续执行数据增强和模型训练
         features, labels = augment_data(features, labels)
         model, accuracy, y_test, y_pred = train_model(features, labels)
         save_model(model, model_output_path)
     else:
         logging.info("微调模式")
-        features, labels = load_features_and_labels(features_path, labels_path)
-        if features is None or labels is None:
-            logging.error("无法加载特征和标签，退出程序")
-            exit(1)
+        if os.path.exists(features_path) and os.path.exists(labels_path):
+            logging.info(f"特征和标签文件已存在: {features_path}, {labels_path}")
+            existing_features, existing_labels = load_features_and_labels(features_path, labels_path)
+            if existing_features is None or existing_labels is None:
+                logging.error("无法加载特征和标签，重新生成特征和标签...")
+                virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
+                features, labels = merge_features_and_labels(virus_features, benign_features)
+            else:
+                # 重新生成特征和标签
+                virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
+                new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
+                # 合并特征和标签
+                features = np.vstack((existing_features, new_features))
+                labels = np.concatenate((existing_labels, new_labels))
+                logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
+
+                # 保存合并后的特征和标签
+                save_features_and_labels(features, labels, features_path, labels_path)
+        else:
+            virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
+            features, labels = merge_features_and_labels(virus_features, benign_features)
+
+            # 保存合并后的特征和标签
+            save_features_and_labels(features, labels, features_path, labels_path)
 
         features, labels = augment_data(features, labels)
-        model, accuracy, y_test, y_pred = train_model(features, labels)
+        initial_model = joblib.load(model_output_path)
+        model, accuracy, y_test, y_pred = train_model(features, labels, initial_model)
         save_model(model, model_output_path)
 
     end_time = time.time()
