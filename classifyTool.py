@@ -4,7 +4,7 @@ import pefile
 import joblib
 from collections import Counter
 import math
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import warnings
 import argparse
@@ -97,6 +97,7 @@ def extract_pe_features(pe):
 
         return features
     except Exception as e:
+        print(f"提取 PE 特征时发生错误: {str(e)}")
         return None
 
 def extract_features(file_path):
@@ -119,12 +120,14 @@ def extract_features(file_path):
             pe = pefile.PE(file_path)
             pe_features = extract_pe_features(pe)
         except pefile.PEFormatError:
+            print(f"PE 格式错误: {file_path}")
             return None
 
         selected_features = [entropy] + byte_distribution + list(first_128_bytes) + list(last_128_bytes) + pe_features
 
         return selected_features
     except Exception as e:
+        print(f"提取特征时发生错误: {file_path} - {str(e)}")
         return None
 
 def process_file(file_path, model):
@@ -132,13 +135,16 @@ def process_file(file_path, model):
         features = extract_features(file_path)
         if features is not None:
             prediction = model.predict([features])[0]
-            return prediction
+            return (file_path, prediction)  # 返回文件路径和预测结果
         else:
-            return -1
+            print(f"特征提取失败: {file_path}")
+            return (file_path, -1)  # 返回 -1 表示特征提取失败
     except pefile.PEFormatError:
-        return -1
+        print(f"PE 格式错误: {file_path}")
+        return (file_path, -1)  # 返回 -1 表示 PE 格式错误
     except Exception as e:
-        return -1
+        print(f"处理文件时发生错误: {file_path} - {str(e)}")
+        return (file_path, -1)  # 返回 -1 表示其他错误
 
 def classify_pe_files(directory, model, max_workers=None):
     results = []
@@ -147,14 +153,23 @@ def classify_pe_files(directory, model, max_workers=None):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             all_files.append(file_path)
-    
+
+    print(f"找到的文件列表: {all_files}")
+
     if not all_files:
         return results
 
     with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count()) as executor:
-        for result in executor.map(lambda file_path: process_file(file_path, model), all_files):
-            if result is not None:
-                results.append((file_path, result))
+        futures = {executor.submit(process_file, file_path, model): file_path for file_path in all_files}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result is not None:
+                    file_path, classification = result
+                    results.append((file_path, classification))
+                    print(f"Processed file: {file_path}, Classification: {classification}")  # 添加调试信息
+            except Exception as e:
+                print(f"处理文件时发生错误: {str(e)}")
 
     return results
 
@@ -187,11 +202,12 @@ if __name__ == "__main__":
     start_time = time.time()
 
     if file_path:
-        classification = process_file(file_path, model)
-        if classification is not None:
-            print(classification)
+        result = process_file(file_path, model)
+        if result is not None:
+            _, classification = result
+            print(classification) 
         else:
-            print(-1)
+            print(-1)  # 如果结果为空，输出 -1
     else:
         results = classify_pe_files(directory, model, max_workers=max_workers)
         end_time = time.time()
