@@ -14,8 +14,8 @@ import logging
 import argparse
 import json
 from tqdm import tqdm
+from sklearn.preprocessing import StandardScaler
 
-# 配置日志记录到文件和控制台
 log_file = "train_virus_detector.log"
 logging.basicConfig(
     level=logging.INFO,
@@ -216,32 +216,42 @@ def augment_data(X, y, n_samples=1000):
     try:
         X_resampled, y_resampled = adasyn.fit_resample(X, y)
         logging.info("ADASYN 过采样完成")
+        logging.info(f"过采样后类别分布: {Counter(y_resampled)}")
     except ValueError as e:
         logging.error(f"ADASYN 错误: {e}")
         try:
             X_resampled, y_resampled = smote.fit_resample(X, y)
             logging.info("SMOTE 过采样完成")
+            logging.info(f"过采样后类别分布: {Counter(y_resampled)}")
         except Exception as e:
             logging.error(f"SMOTE 错误: {e}")
             raise RuntimeError("数据增强失败，请检查输入数据")
 
     return X_resampled, y_resampled
 
+def preprocess_features(features):
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
+    return features_scaled
+
 def train_model(features, labels, initial_model=None):
     logging.info(f"数据集大小: {len(features)}")
     logging.info(f"类别分布: {Counter(labels)}")
 
-    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.4, random_state=42)
 
     X_train_resampled, y_train_resampled = augment_data(X_train, y_train)
+
+    X_train_resampled = preprocess_features(X_train_resampled)
+    X_test = preprocess_features(X_test)
 
     param_grids = {
         'LightGBM': {
             'model': initial_model if initial_model else LGBMClassifier(random_state=42),
             'param_grid': {
-                'n_estimators': [100, 200],
-                'learning_rate': [0.01, 0.1],
-                'max_depth': [3, 5, 7]
+                'n_estimators': [50, 100, 200],
+                'learning_rate': [0.001, 0.01, 0.1],
+                'max_depth': [3, 5, 7, 9]
             }
         }
     }
@@ -319,11 +329,9 @@ if __name__ == "__main__":
         else:
             existing_features, existing_labels = [], []
 
-        # 生成新的特征和标签
         virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
         new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
 
-        # 合并特征和标签
         if len(existing_features) > 0 and len(existing_labels) > 0:
             features = np.vstack((existing_features, new_features))
             labels = np.concatenate((existing_labels, new_labels))
@@ -333,10 +341,8 @@ if __name__ == "__main__":
 
         logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
 
-        # 保存合并后的特征和标签
         save_features_and_labels(features, labels, features_path, labels_path)
 
-        # 继续执行数据增强和模型训练
         features, labels = augment_data(features, labels)
         model, accuracy, y_test, y_pred = train_model(features, labels)
         save_model(model, model_output_path)
@@ -350,21 +356,17 @@ if __name__ == "__main__":
                 virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
                 features, labels = merge_features_and_labels(virus_features, benign_features)
             else:
-                # 重新生成特征和标签
                 virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
                 new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
-                # 合并特征和标签
                 features = np.vstack((existing_features, new_features))
                 labels = np.concatenate((existing_labels, new_labels))
                 logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
 
-                # 保存合并后的特征和标签
                 save_features_and_labels(features, labels, features_path, labels_path)
         else:
             virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
             features, labels = merge_features_and_labels(virus_features, benign_features)
 
-            # 保存合并后的特征和标签
             save_features_and_labels(features, labels, features_path, labels_path)
 
         features, labels = augment_data(features, labels)
