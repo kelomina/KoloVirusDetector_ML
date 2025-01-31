@@ -1,86 +1,130 @@
 # KoloVirusDetector_ML
 
-# 概述
+# 恶意软件检测系统
 
-本项目旨在训练一个恶意软件检测模型，使用 LightGBM 算法来区分恶意软件和良性软件。项目通过提取 PE 文件的特征，并使用这些特征来训练和评估模型。
+基于PE文件特征和机器学习算法的恶意软件检测系统，能够有效识别病毒文件与良性文件。
 
-## 安装指南
+## 项目亮点
 
-### 依赖安装
+- **多线程特征提取**：支持批量文件处理，提升特征提取效率
+- **专业PE文件解析**：深入分析PE头结构、节区特征、导入函数等关键信息
+- **智能数据增强**：集成ADASYN/SMOTE算法处理类别不平衡
+- **模型自动调优**：基于GridSearchCV的自动超参数优化
+- **增量学习支持**：支持增量训练和模型微调两种模式
+- **生产级日志系统**：完整记录训练过程和关键指标
 
-确保你已经安装了以下依赖项：
+## 环境要求
 
-- `Python 3.6 或更高版本`
-- `numpy`
-- `scikit-learn`
-- `lightgbm`
-- `pefile`
-- `joblib`
-- `imbalanced-learn`
-- `tqdm`
-- `argparse`
-- `json`
+- Python 3.6+
+- 依赖库：
+  ```
+  lightgbm==3.3.5
+  pefile==2023.2.7
+  numpy==1.23.5
+  scikit-learn==1.2.2
+  imbalanced-learn==0.10.1
+  tqdm==4.65.0
+  ```
 
-你可以使用以下命令安装这些依赖项：
+## 快速开始
 
-bash``````
+### 1. 安装依赖
+```bash
+pip install lightgbm pefile numpy scikit-learn imbalanced-learn tqdm
+```
 
-##使用方法
+### 2. 准备数据
+```
+样本库/
+├── 待拉黑/        # 病毒样本
+└── 待加入白名单/   # 良性样本
+```
 
-###配置文件
-首先，创建一个配置文件 config.json，示例如下：
-
-json```
+### 3. 配置文件示例（config.json）
+```json
 {
     "virus_samples_dir": "E:\\样本库\\待拉黑",
     "benign_samples_dir": "E:\\样本库\\待加入白名单",
     "features_path": "features.npy",
     "labels_path": "labels.npy",
-    "model_path": "ML.pkl"
-}```
-运行脚本
+    "model_output_path": "malware_detector.joblib"
+}
+```
 
+### 4. 启动训练
+```bash
+# 增量训练模式（推荐首次训练）
+python train.py --config config.json --mode incremental
 
-使用以下命令运行训练脚本：
+# 微调模式（已有模型基础上优化）
+python train.py --config config.json --mode fine_tune
+```
 
-bash```
-python train_virus_detector.py --config config.json```
-##参数说明
---config: 配置文件路径，包含样本目录和输出文件路径。
+## 项目结构
+```
+malware-detector/
+├── train.py               # 主训练程序
+├── config.json            # 配置文件示例
+├── features.npy           # 特征数据存储
+├── labels.npy             # 标签数据存储
+├── model.joblib           # 训练好的模型
+└── train_virus_detector.log  # 训练日志
+```
 
-输出
-`features.npy: 提取的特征数据。
-labels.npy: 对应的标签数据。
-ML.pkl: 训练好的模型文件。
-virus_detection_results.txt: 包含程序运行时间、模型准确率和性能报告。`
+## 配置说明
+| 参数                 | 说明                          | 示例值                          |
+|----------------------|-----------------------------|--------------------------------|
+| virus_samples_dir    | 病毒样本目录                    | "E:\\样本库\\待拉黑"           |
+| benign_samples_dir   | 良性样本目录                    | "E:\\样本库\\待加入白名单"     |
+| features_path        | 特征数据保存路径                | "features.npy"                |
+| labels_path          | 标签数据保存路径                | "labels.npy"                  |
+| model_output_path    | 模型保存路径                    | "malware_detector.joblib"     |
 
-##日志记录
-程序运行过程中会生成日志信息，记录在控制台中，包括特征提取、模型训练和评估的过程。
+## 特征工程
+系统提取超过600维特征，包括：
+1. **基础特征**
+   - 文件熵值
+   - 字节分布直方图
+   - 首尾128字节原始数据
 
-##示例
-###配置文件示例
-json
-`{
-    "virus_samples_dir": "E:\\样本库\\待拉黑",
-    "benign_samples_dir": "E:\\样本库\\待加入白名单",
-    "features_path": "features.npy",
-    "labels_path": "labels.npy",
-    "model_path": "ML.pkl"
-}`
+2. **PE结构特征**
+   - DOS头/文件头/可选头关键字段
+   - 节区信息（.text段熵值、.data段大小）
+   - 导入函数特征（排序后前32个函数）
 
-###运行结果示例`
-2023-10-10 12:34:56,789 - INFO - 模型 ML.pkl 加载成功
-2023-10-10 12:34:56,789 - INFO - 发现已存在的特征和标签文件，正在加载...
-2023-10-10 12:34:56,789 - INFO - 正在训练模型...
-2023-10-10 12:34:56,789 - INFO - 
-训练 RandomForest 模型...
-Fitting 3 folds for each of 12 candidates, totalling 36 fits
-...
-2023-10-10 12:34:56,789 - INFO - 最佳模型: RandomForestClassifier
-2023-10-10 12:34:56,789 - INFO - 最佳准确率: 0.95
-2023-10-10 12:34:56,789 - INFO - 程序运行完毕，总耗时：123.45 秒
-2023-10-10 12:34:56,789 - INFO - 最终模型准确率：0.95
-`
+3. **元数据特征**
+   - 文件描述信息
+   - 版权信息
+   - 版本信息
 
-##贡献
-欢迎贡献代码、报告问题或提出建议。
+## 训练结果示例
+```
+最佳模型: LGBMClassifier
+最佳准确率: 0.98
+
+              precision    recall  f1-score   support
+
+           0       0.97      0.99      0.98      1234
+           1       0.99      0.97      0.98      1156
+
+    accuracy                           0.98      2390
+   macro avg       0.98      0.98      0.98      2390
+weighted avg       0.98      0.98      0.98      2390
+```
+
+## 注意事项
+1. 样本安全：建议在隔离的虚拟环境中运行
+2. 硬件要求：建议配备至少16GB内存
+3. 数据平衡：初始样本建议保持1:1~1:3的病毒/良性比例
+4. 模型更新：推荐每月进行增量训练保持检测能力
+
+## 许可协议
+本项目采用 MIT 开源许可证，详见 LICENSE 文件。
+
+## 致谢
+项目基于以下开源技术构建：
+- LightGBM by Microsoft
+- pefile by Ero Carrera
+- scikit-learn 社区
+
+欢迎提交 Issue 和 PR 共同改进本项目！
