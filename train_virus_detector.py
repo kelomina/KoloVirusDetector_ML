@@ -3,151 +3,290 @@ import time
 import numpy as np
 from collections import Counter
 from lightgbm import LGBMClassifier
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import classification_report, accuracy_score, roc_curve, auc
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.metrics import classification_report, accuracy_score, roc_curve
 import joblib
 import pefile
 import math
 from imblearn.over_sampling import ADASYN, SMOTE
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import logging
 import argparse
 import json
 from tqdm import tqdm
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+import io
+from PIL import Image
+from scipy.stats import anderson_ksamp
+import mmap
+from sklearn.feature_selection import SelectKBest, f_classif
+from func_timeout import func_timeout, FunctionTimedOut 
+from sklearn.decomposition import PCA 
 
+# 配置日志记录
 log_file = "train_virus_detector.log"
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG, 
     format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',  
     handlers=[
         logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
 
+# 计算数据的熵
 def calculate_entropy(data):
-    if not data:
-        return 0
     counter = Counter(data)
     length = len(data)
     entropy = -sum((count / length) * math.log2(count / length) for count in counter.values())
     return entropy
 
-def extract_pe_features(pe):
+# 字符串特征定长处理
+def string_to_fixed_length_bytes(s, max_length=100):
+    if not s:
+        return [0] * max_length
+    bytes_ = s.encode('utf-8')[:max_length].ljust(max_length, b'\x00')
+    return list(bytes_)
+
+# 提取文件特征
+def extract_combined_features(file_path):
     try:
-        dos_header = getattr(pe, 'DOS_HEADER', None)
-        file_header = getattr(pe, 'FILE_HEADER', None)
-        optional_header = getattr(pe, 'OPTIONAL_HEADER', None)
-
-        if not all([dos_header, file_header, optional_header]):
-            logging.warning("PE 文件缺少必要头信息")
-            return None
-
-        features = [
-            dos_header.e_magic,
-            dos_header.e_lfanew,
-            file_header.Machine,
-            file_header.NumberOfSections,
-            optional_header.AddressOfEntryPoint,
-            optional_header.ImageBase,
-            optional_header.SectionAlignment,
-            optional_header.FileAlignment,
-            optional_header.SizeOfImage,
-            optional_header.SizeOfHeaders,
-            optional_header.CheckSum,
-            optional_header.Subsystem,
-            optional_header.SizeOfStackReserve,
-            optional_header.SizeOfStackCommit,
-            optional_header.SizeOfHeapReserve,
-            optional_header.SizeOfHeapCommit,
-            optional_header.NumberOfRvaAndSizes
-        ]
-
-        text_section = next((section for section in pe.sections if b'.text' in section.Name), None)
-        text_entropy = calculate_entropy(text_section.get_data()) if text_section else 0
-        features.append(text_entropy)
-
-        data_section_size = next((section.Misc_VirtualSize for section in pe.sections if b'.data' in section.Name), 0)
-        features.append(data_section_size)
-
-        imported_functions = set()
-        if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
-            for entry in pe.DIRECTORY_ENTRY_IMPORT:
-                for imp in entry.imports:
-                    if imp.name:
-                        imported_functions.add(imp.name.decode('utf-8', errors='ignore'))
-        
-        sorted_imported_functions = sorted(imported_functions)[:32]
-        function_names_feature = [func.encode('utf-8')[:50] for func in sorted_imported_functions]
-        function_names_feature += [b'\x00'] * (32 - len(function_names_feature))
-        function_names_feature = [byte for func_name in function_names_feature for byte in func_name.ljust(50, b'\x00')]
-        features.extend(function_names_feature)
-
-        description = ''
-        copyright_info = ''
-        if hasattr(pe, 'FileInfo'):
-            for entry in pe.FileInfo:
-                if hasattr(entry, 'StringTable'):
-                    for st in entry.StringTable:
-                        for key, value in st.entries.items():
-                            if key.lower() == 'filedescription':
-                                description = value.decode('utf-8', errors='ignore')
-                            elif key.lower() == 'legalcopyright':
-                                copyright_info = value.decode('utf-8', errors='ignore')
-        
-        description_bytes = description.encode('utf-8')[:128] + b'\x00' * (128 - min(len(description), 128))
-        copyright_info_bytes = copyright_info.encode('utf-8')[:128] + b'\x00' * (128 - min(len(copyright_info), 128))
-        features.extend(description_bytes)
-        features.extend(copyright_info_bytes)
-
-        return features
-    except Exception as e:
-        logging.error(f"无法提取 PE 特征: {e}")
+        return func_timeout(30, _extract_combined_features, args=(file_path,))  # 30秒超时
+    except FunctionTimedOut:
+        logging.error(f"处理文件 {file_path} 超时")
         return None
 
-def extract_features(file_path):
+def _extract_combined_features(file_path):
     try:
         with open(file_path, "rb") as f:
-            file_data = f.read()
+            mmapped_data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            file_data = np.frombuffer(mmapped_data, dtype=np.uint8)
 
-        byte_distribution = [0] * 256
-        for byte in file_data:
-            byte_distribution[byte] += 1
-        byte_distribution = [x / len(file_data) for x in byte_distribution]
+        # 检查文件大小
+        if len(file_data) < 64:
+            logging.warning(f"文件 {file_path} 太小，不是有效的 PE 文件")
+            return None
 
+        # 检查 DOS 头（转换为 bytes 比较）
+        dos_header = file_data[:2].tobytes()
+        if dos_header != b'MZ':
+            logging.warning(f"文件 {file_path} 缺少 DOS 头签名 (MZ)")
+            return None
+
+        # 检查 PE 头位置有效性
+        pe_header_offset = int.from_bytes(file_data[0x3c:0x40], byteorder='little')
+        if pe_header_offset + 4 > len(file_data):
+            logging.warning(f"文件 {file_path} 的 PE 头偏移无效")
+            return None
+
+        # 检查 PE 签名（转换为 bytes 比较）
+        pe_signature = file_data[pe_header_offset:pe_header_offset+4].tobytes()
+        if pe_signature != b'PE\x00\x00':
+            logging.warning(f"文件 {file_path} 缺少 PE 头签名 (PE\x00\x00)")
+            return None
+
+        # 计算文件熵
         entropy = calculate_entropy(file_data)
 
-        first_128_bytes = file_data[:128].ljust(128, b'\x00')
-        last_128_bytes = file_data[-128:].rjust(128, b'\x00')
-
         pe_features = []
+
         try:
             pe = pefile.PE(file_path)
             pe_features = extract_pe_features(pe)
+            file_description = get_pe_string(pe, 'FileDescription')
+            file_version = get_pe_string(pe, 'FileVersion')
+            product_name = get_pe_string(pe, 'ProductName')
+            product_version = get_pe_string(pe, 'ProductVersion')
+            legal_copyright = get_pe_string(pe, 'LegalCopyright')
+
+            # 检查数字签名和目录签名
+            has_digital_signature = 0
+            has_directory_signature = 0
+            if hasattr(pe, 'DIRECTORY_ENTRY_SECURITY'):
+                has_directory_signature = 1
+                if pe.DIRECTORY_ENTRY_SECURITY:
+                    has_digital_signature = 1
+            # 检查数字签名有效性
+            digital_signature_valid = 0
+            if has_digital_signature:
+                try:
+                    if pe.verify_signature():
+                        digital_signature_valid = 1
+                except Exception as e:
+                    logging.warning(f"文件 {file_path} 数字签名验证失败: {e}")
+            # 提取 .text 段内容
+            text_section = next((section for section in pe.sections if section.Name.rstrip(b'\x00').decode('utf-8') == '.text'), None)
+            text_section_content = text_section.get_data() if text_section else b''
+            text_section_entropy = calculate_entropy(text_section_content) if text_section else 0
+
+            # 检查 .text 段是否被重命名
+            text_section_renamed = 0
+            if text_section and text_section.Name.rstrip(b'\x00').decode('utf-8') != '.text':
+                text_section_renamed = 1
+
+            # 提取 .data 段大小
+            data_section = next((section for section in pe.sections if section.Name.rstrip(b'\x00').decode('utf-8') == '.data'), None)
+            data_section_size = data_section.Misc_VirtualSize if data_section else 0
+            # 提取图标数据
+            icon_data = []
+            icon_color_histograms = []
+            icon_dimensions = []
+            if hasattr(pe, 'DIRECTORY_ENTRY_RESOURCE'):
+                for resource_type in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+                    if resource_type.name == pefile.RESOURCE_TYPE['RT_GROUP_ICON']:
+                        for resource_id in resource_type.directory.entries:
+                            for resource_lang in resource_id.directory.entries:
+                                data_rva = resource_lang.data.struct.OffsetToData
+                                size = resource_lang.data.struct.Size
+                                icon_data.extend(pe.get_memory_mapped_image()[data_rva:data_rva + size])
+
+                                # 提取图标颜色直方图和尺寸
+                                icon_bytes = pe.get_memory_mapped_image()[data_rva:data_rva + size]
+                                icon_stream = io.BytesIO(icon_bytes)
+                                try:
+                                    icon_image = Image.open(icon_stream)
+                                    icon_dimensions.append((icon_image.width, icon_image.height))
+                                    icon_color_histograms.append(len(icon_image.getcolors()))
+                                except Exception as e:
+                                    logging.warning(f"无法提取图标特征: {e}")
+
+            # 将字符串特征转换为字节码特征
+            file_description_bytes = string_to_fixed_length_bytes(file_description, max_length=50)
+            file_version_bytes = string_to_fixed_length_bytes(file_version, max_length=50)
+            product_name_bytes = string_to_fixed_length_bytes(product_name, max_length=50)
+            product_version_bytes = string_to_fixed_length_bytes(product_version, max_length=50)
+            legal_copyright_bytes = string_to_fixed_length_bytes(legal_copyright, max_length=50)
+
+            # 提取导入表信息
+            import_table_info = []
+            if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
+                for entry in pe.DIRECTORY_ENTRY_IMPORT:
+                    import_library_name = entry.dll.decode('utf-8')
+                    import_functions = [imp.name.decode('utf-8') for imp in entry.imports if imp.name]
+                    import_table_info.append((import_library_name, import_functions))
+
+            # 提取导出表信息
+            export_table_info = []
+            if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT'):
+                for exp in pe.DIRECTORY_ENTRY_EXPORT.symbols:
+                    export_function_name = exp.name.decode('utf-8') if exp.name else f"Ordinal_{exp.ordinal}"
+                    export_table_info.append((export_function_name, exp.ordinal))
+
+            # 合并导入表和导出表信息为一个字符串
+            import_table_features = ','.join([f"{lib}_{func}" for lib, funcs in import_table_info for func in funcs])
+            export_table_features = ','.join([f"{name}_{ordinal}" for name, ordinal in export_table_info])
+
+            # 合并特征
+            selected_features = [
+                entropy,
+                text_section_entropy,
+                data_section_size,
+                *pe_features,
+                *file_description_bytes, *file_version_bytes, *product_name_bytes, *product_version_bytes, *legal_copyright_bytes,
+                has_digital_signature, has_directory_signature, digital_signature_valid, text_section_renamed
+            ]
+
+            # 添加图标颜色直方图和尺寸特征
+            for color_count in icon_color_histograms:
+                selected_features.append(color_count)
+            for width, height in icon_dimensions:
+                selected_features.append(width)
+                selected_features.append(height)
+
+            expected_length = 2500
+            if len(selected_features) < expected_length:
+                selected_features.extend([0] * (expected_length - len(selected_features)))
+            elif len(selected_features) > expected_length:
+                selected_features = selected_features[:expected_length]
+
+            return selected_features
         except pefile.PEFormatError:
             logging.warning(f"文件 {file_path} 不是有效的 PE 文件")
             return None
-
-        selected_features = [entropy] + byte_distribution + list(first_128_bytes) + list(last_128_bytes) + pe_features
-
-        return selected_features
+        except Exception as e:
+            logging.error(f"解析 PE 文件 {file_path} 时发生错误: {e}")
+            return None
     except Exception as e:
         logging.error(f"无法读取文件 {file_path}: {e}")
         return None
 
-def process_file(file_path, label):
-    feature = extract_features(file_path)
-    return (feature, label) if feature is not None else (None, None)
+# 获取 PE 文件的字符串信息
+def get_pe_string(pe, string_name):
+    if hasattr(pe, 'VS_FIXEDFILEINFO'):
+        for entry in pe.FileInfo:
+            if hasattr(entry, 'StringTable'):
+                for st in entry.StringTable:
+                    for key, value in st.entries.items():
+                        if key.decode('utf-8') == string_name:
+                            return value.decode('utf-8')
+            elif hasattr(entry, 'Var'):
+                for var in entry.Var:
+                    for key, value in var.entry.items():
+                        if key.decode('utf-8') == string_name:
+                            return value.decode('utf-8')
+    return None
 
-def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
-    def list_files(directory):
-        file_paths = []
+# 提取 PE 文件特征
+def extract_pe_features(pe):
+    features = []
+    # 提取 PE 文件的基本信息
+    features.append(pe.FILE_HEADER.Machine)
+    features.append(pe.FILE_HEADER.NumberOfSections)
+    features.append(pe.FILE_HEADER.TimeDateStamp)
+    features.append(pe.FILE_HEADER.PointerToSymbolTable)
+    features.append(pe.FILE_HEADER.NumberOfSymbols)
+    features.append(pe.FILE_HEADER.SizeOfOptionalHeader)
+    features.append(pe.FILE_HEADER.Characteristics)
+    features.append(pe.OPTIONAL_HEADER.Magic)
+    features.append(pe.OPTIONAL_HEADER.MajorLinkerVersion)
+    features.append(pe.OPTIONAL_HEADER.MinorLinkerVersion)
+    features.append(pe.OPTIONAL_HEADER.SizeOfCode)
+    features.append(pe.OPTIONAL_HEADER.SizeOfInitializedData)
+    features.append(pe.OPTIONAL_HEADER.SizeOfUninitializedData)
+    features.append(pe.OPTIONAL_HEADER.AddressOfEntryPoint)
+    features.append(pe.OPTIONAL_HEADER.BaseOfCode)
+    features.append(pe.OPTIONAL_HEADER.ImageBase)
+    features.append(pe.OPTIONAL_HEADER.SectionAlignment)
+    features.append(pe.OPTIONAL_HEADER.FileAlignment)
+    features.append(pe.OPTIONAL_HEADER.MajorOperatingSystemVersion)
+    features.append(pe.OPTIONAL_HEADER.MinorOperatingSystemVersion)
+    features.append(pe.OPTIONAL_HEADER.MajorImageVersion)
+    features.append(pe.OPTIONAL_HEADER.MinorImageVersion)
+    features.append(pe.OPTIONAL_HEADER.MajorSubsystemVersion)
+    features.append(pe.OPTIONAL_HEADER.MinorSubsystemVersion)
+    features.append(pe.OPTIONAL_HEADER.SizeOfImage)
+    features.append(pe.OPTIONAL_HEADER.SizeOfHeaders)
+    features.append(pe.OPTIONAL_HEADER.CheckSum)
+    features.append(pe.OPTIONAL_HEADER.Subsystem)
+    features.append(pe.OPTIONAL_HEADER.DllCharacteristics)
+    features.append(pe.OPTIONAL_HEADER.SizeOfStackReserve)
+    features.append(pe.OPTIONAL_HEADER.SizeOfStackCommit)
+    features.append(pe.OPTIONAL_HEADER.SizeOfHeapReserve)
+    features.append(pe.OPTIONAL_HEADER.LoaderFlags)
+    features.append(pe.OPTIONAL_HEADER.NumberOfRvaAndSizes)
+    return features
+
+def list_files(directory):
+    file_paths = []
+    try:
+        file_count = 0
         for root, dirs, files in os.walk(directory):
             for file in files:
-                file_paths.append(os.path.join(root, file))
-        return file_paths
+                file_path = os.path.join(root, file)
+                if os.path.isfile(file_path):
+                    file_paths.append(file_path)
+                    file_count += 1
+                    if file_count % 100 == 0:
+                        logging.info(f"已枚举 {file_count} 个文件...")
+        logging.info(f"目录 {directory} 中共找到 {file_count} 个文件")
+    except Exception as e:
+        logging.error(f"枚举文件时发生错误: {e}")
+    return file_paths
 
+def create_dataset(virus_dir, benign_dir, batch_size=256, max_workers=256):
     if not os.path.exists(virus_dir):
         logging.error(f"病毒样本目录 {virus_dir} 不存在")
         return [], []
@@ -157,6 +296,11 @@ def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
 
     virus_files = list_files(virus_dir)
     benign_files = list_files(benign_dir)
+
+    if not virus_files:
+        logging.warning(f"病毒样本目录 {virus_dir} 中没有文件")
+    if not benign_files:
+        logging.warning(f"良性样本目录 {benign_dir} 中没有文件")
 
     all_files = [(file_path, 1) for file_path in virus_files] + [(file_path, 0) for file_path in benign_files]
 
@@ -171,8 +315,15 @@ def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
         end_idx = min(start_idx + batch_size, len(all_files))
         batch_files = all_files[start_idx:end_idx]
 
-        with ThreadPoolExecutor(max_workers=max_workers or os.cpu_count() // 2) as executor:
-            results = list(executor.map(lambda args: process_file(*args), batch_files))
+        with ProcessPoolExecutor(max_workers=4) as executor:  # 减少并发数
+            futures = [executor.submit(process_file_wrapper, (file_path, label)) for (file_path, label) in batch_files]
+            results = []
+            for future in tqdm(futures, desc="处理批次文件"):
+                try:
+                    results.append(future.result(timeout=60)) 
+                except TimeoutError:
+                    logging.error("处理文件超时")
+                    results.append((None, None))
 
         skipped_files = [file_path for (file_path, label), result in zip(batch_files, results) if result[0] is None]
         if skipped_files:
@@ -188,19 +339,46 @@ def create_dataset(virus_dir, benign_dir, batch_size=32, max_workers=None):
 
     logging.info(f"数据集生成完成，总病毒样本数: {len(virus_features_all)}，总良性样本数: {len(benign_features_all)}")
 
+    expected_length = 1000
+    virus_features_all = [feature + [0] * (expected_length - len(feature)) if len(feature) < expected_length else feature for feature in virus_features_all]
+    benign_features_all = [feature + [0] * (expected_length - len(feature)) if len(feature) < expected_length else feature for feature in benign_features_all]
+
     return virus_features_all, benign_features_all
 
+# 新增命名函数
+def process_file_wrapper_with_vectorizer(args):
+    return process_file_wrapper(args)
+
+# 处理单个文件
+def process_file(file_path, label):
+    try:
+        feature = extract_combined_features(file_path)
+        return (feature, label) if feature is not None else (None, None)
+    except Exception as e:
+        logging.error(f"处理文件 {file_path} 时发生错误: {e}")
+        return (None, None)
+
+def process_file_wrapper(args):
+    try:
+        return process_file(*args)
+    except Exception as e:
+        logging.error(f"处理文件 {args[0]} 时发生错误: {e}")
+        return (None, None)
+
+# 合并特征和标签
 def merge_features_and_labels(virus_features, benign_features):
     features = virus_features + benign_features
     labels = [1] * len(virus_features) + [0] * len(benign_features)
     logging.info(f"特征和标签合并完成，总样本数: {len(features)}")
     return np.array(features), np.array(labels)
 
+# 保存特征和标签
 def save_features_and_labels(features, labels, features_path, labels_path):
     np.save(features_path, features)
     np.save(labels_path, labels)
     logging.info(f"特征和标签已保存到 {features_path} 和 {labels_path}")
 
+# 加载特征和标签
 def load_features_and_labels(features_path, labels_path):
     if not os.path.exists(features_path) or not os.path.exists(labels_path):
         logging.error(f"特征或标签文件不存在: {features_path}, {labels_path}")
@@ -210,84 +388,134 @@ def load_features_and_labels(features_path, labels_path):
     logging.info(f"特征和标签已从 {features_path} 和 {labels_path} 加载")
     return features, labels
 
-def augment_data(X, y, n_samples=1000):
-    adasyn = ADASYN(random_state=42, sampling_strategy='minority')
-    smote = SMOTE(random_state=42)
-    try:
-        X_resampled, y_resampled = adasyn.fit_resample(X, y)
-        logging.info("ADASYN 过采样完成")
-        logging.info(f"过采样后类别分布: {Counter(y_resampled)}")
-    except ValueError as e:
-        logging.error(f"ADASYN 错误: {e}")
-        try:
-            X_resampled, y_resampled = smote.fit_resample(X, y)
-            logging.info("SMOTE 过采样完成")
-            logging.info(f"过采样后类别分布: {Counter(y_resampled)}")
-        except Exception as e:
-            logging.error(f"SMOTE 错误: {e}")
-            raise RuntimeError("数据增强失败，请检查输入数据")
-
-    return X_resampled, y_resampled
-
+# 特征预处理
 def preprocess_features(features):
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(features)
     return features_scaled
 
-def train_model(features, labels, initial_model=None):
+# 特征压缩
+def compress_features(features, method='PCA', n_components=50):
+    if method == 'PCA':
+        from sklearn.decomposition import PCA
+        compressor = PCA(n_components=0.95)  # 保留95%的方差
+        compressed_features = compressor.fit_transform(features)
+        logging.info(f"特征压缩完成，压缩方法: {method}, 保留的主成分数量: {compressed_features.shape[1]}")
+    elif method == 'AutoEncoder':
+        from sklearn.neural_network import MLPRegressor
+        compressor = MLPRegressor(hidden_layer_sizes=(n_components,), activation='relu', solver='adam', max_iter=500)
+        compressed_features = compressor.fit_transform(features)
+    else:
+        raise ValueError("Unsupported compression method")
+
+    return compressed_features
+
+# 数据增强
+def augment_data(features, labels):
+    logging.info("开始数据增强...")
+    try:
+        # 使用 ADASYN 进行数据增强
+        ada = ADASYN(random_state=42)
+        features_resampled, labels_resampled = ada.fit_resample(features, labels)
+        logging.info("数据增强完成，增强后的样本数: {}".format(len(labels_resampled)))
+        return features_resampled, labels_resampled
+    except Exception as e:
+        logging.error(f"数据增强时发生错误: {e}")
+        return features, labels
+
+# 训练模型
+def train_model(features, labels, initial_model=None, feature_importance_threshold=0.01, min_features=10):
     logging.info(f"数据集大小: {len(features)}")
     logging.info(f"类别分布: {Counter(labels)}")
 
-    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.4, random_state=42)
+    # 特征预处理
+    features_scaled = StandardScaler().fit_transform(features)
 
-    X_train_resampled, y_train_resampled = augment_data(X_train, y_train)
+    # 特征压缩
+    features_compressed = PCA(n_components=0.95).fit_transform(features_scaled)
 
-    X_train_resampled = preprocess_features(X_train_resampled)
-    X_test = preprocess_features(X_test)
+    X_train, X_test, y_train, y_test = train_test_split(features_compressed, labels, test_size=0.2, random_state=42)
 
-    param_grids = {
-        'LightGBM': {
-            'model': initial_model if initial_model else LGBMClassifier(random_state=42),
-            'param_grid': {
-                'n_estimators': [50, 100, 200],
-                'learning_rate': [0.001, 0.01, 0.1],
-                'max_depth': [3, 5, 7, 9]
-            }
-        }
+    # 使用Pipeline嵌入特征选择步骤
+    from sklearn.pipeline import Pipeline
+    pipeline = Pipeline([
+        ('feature_selection', SelectKBest(score_func=f_classif)),
+        ('classifier', StackingClassifier(
+            estimators=[('LightGBM', LGBMClassifier(random_state=42, class_weight='balanced', num_leaves=31, min_data_in_leaf=20)),
+                        ('LogisticRegression', LogisticRegression(random_state=42, max_iter=1000, solver='liblinear', class_weight='balanced')),
+                        ('RandomForest', RandomForestClassifier(random_state=42, class_weight='balanced'))],
+            final_estimator=LogisticRegression(random_state=42, max_iter=1000, solver='liblinear', class_weight='balanced'),
+            stack_method='predict_proba'
+        ))
+    ])
+
+    param_grid = {
+        'feature_selection__k': [50, 100, 'all'],
+        'classifier__LightGBM__n_estimators': [100, 200, 500],
+        'classifier__LightGBM__max_depth': [5, 7, 9],
+        'classifier__LightGBM__reg_alpha': [0, 0.1],
+        'classifier__LightGBM__reg_lambda': [0, 0.1],
+        'classifier__LightGBM__min_child_samples': [20, 50],
+        'classifier__LogisticRegression__C': [0.1, 1, 10],
+        'classifier__RandomForest__n_estimators': [50, 100, 200],
+        'classifier__RandomForest__max_depth': [3, 5, 7, 9],
+        'classifier__final_estimator__C': [0.1, 1, 10]
     }
 
-    best_model = None
-    best_accuracy = 0
-    best_y_pred = None
+    random_search = RandomizedSearchCV(estimator=pipeline, param_distributions=param_grid, n_iter=50, cv=3, n_jobs=4, verbose=2, random_state=42)
+    random_search.fit(X_train, y_train)
 
-    for model_name, config in param_grids.items():
-        logging.info(f"\n训练 {model_name} 模型...")
-        grid_search = GridSearchCV(estimator=config['model'], param_grid=config['param_grid'], cv=3, n_jobs=4, verbose=2)
-        grid_search.fit(X_train_resampled, y_train_resampled)
+    best_estimator = random_search.best_estimator_
+    y_prob = best_estimator.predict_proba(X_test)[:, 1] if hasattr(best_estimator, 'predict_proba') else best_estimator.decision_function(X_test)
+    fpr, tpr, thresholds = roc_curve(y_test, y_prob)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    y_pred = (y_prob >= optimal_threshold).astype(int)
 
-        best_estimator = grid_search.best_estimator_
+    logging.info(f"Stacking模型最佳参数: {random_search.best_params_}")
+    logging.info(f"Stacking模型最优阈值: {optimal_threshold}")
+    logging.info(f"Stacking模型性能报告：\n{classification_report(y_test, y_pred)}")
+    accuracy = accuracy_score(y_test, y_pred)
+    logging.info(f"Stacking模型准确率：{accuracy:.2f}")
+
+    # 获取LightGBM特征重要性
+    lgbm_model = best_estimator.named_steps['classifier'].named_estimators_['LightGBM']
+    feature_importances = lgbm_model.feature_importances_
+    feature_names = np.array([f"feature_{i}" for i in range(X_train.shape[1])])
+
+    # 递归地去除不重要的特征
+    while len(feature_importances) > min_features and np.any(feature_importances < feature_importance_threshold):
+        selected_features = feature_importances >= feature_importance_threshold
+        X_train = X_train[:, selected_features]
+        X_test = X_test[:, selected_features]
+        feature_importances = feature_importances[selected_features]
+        feature_names = feature_names[selected_features]
+
+        logging.info(f"递归去除不重要的特征后，剩余特征数: {len(feature_importances)}")
+
+        # 重新训练模型
+        random_search.fit(X_train, y_train)
+        best_estimator = random_search.best_estimator_
         y_prob = best_estimator.predict_proba(X_test)[:, 1] if hasattr(best_estimator, 'predict_proba') else best_estimator.decision_function(X_test)
         fpr, tpr, thresholds = roc_curve(y_test, y_prob)
         optimal_idx = np.argmax(tpr - fpr)
         optimal_threshold = thresholds[optimal_idx]
         y_pred = (y_prob >= optimal_threshold).astype(int)
 
-        logging.info(f"{model_name} 最佳参数: {grid_search.best_params_}")
-        logging.info(f"{model_name} 最优阈值: {optimal_threshold}")
-        logging.info(f"{model_name} 模型性能报告：\n{classification_report(y_test, y_pred)}")
+        logging.info(f"递归去除不重要的特征后，Stacking模型最佳参数: {random_search.best_params_}")
+        logging.info(f"递归去除不重要的特征后，Stacking模型最优阈值: {optimal_threshold}")
+        logging.info(f"递归去除不重要的特征后，Stacking模型性能报告：\n{classification_report(y_test, y_pred)}")
         accuracy = accuracy_score(y_test, y_pred)
-        logging.info(f"{model_name} 准确率：{accuracy:.2f}")
+        logging.info(f"递归去除不重要的特征后，Stacking模型准确率：{accuracy:.2f}")
 
-        if accuracy > best_accuracy:
-            best_accuracy = accuracy
-            best_model = best_estimator
-            best_y_pred = y_pred
+        # 更新LightGBM特征重要性
+        lgbm_model = best_estimator.named_steps['classifier'].named_estimators_['LightGBM']
+        feature_importances = lgbm_model.feature_importances_
+        feature_names = np.array([f"feature_{i}" for i in range(X_train.shape[1])])
 
-    logging.info(f"\n最佳模型: {type(best_model).__name__}")
-    logging.info(f"最佳准确率: {best_accuracy:.2f}")
+    return best_estimator, accuracy, y_test, y_pred
 
-    return best_model, best_accuracy, y_test, best_y_pred
-
+# 保存模型
 def save_model(model, output_path):
     joblib.dump(model, output_path)
     logging.info(f"模型已保存到 {output_path}")
@@ -332,14 +560,19 @@ if __name__ == "__main__":
         virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
         new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
 
-        if len(existing_features) > 0 and len(existing_labels) > 0:
-            features = np.vstack((existing_features, new_features))
-            labels = np.concatenate((existing_labels, new_labels))
+        if len(new_features) == 0 and len(new_labels) == 0:
+            logging.info("新生成的特征和标签数量为0，跳过合并数据集，直接使用现有数据集开始训练")
+            features = existing_features
+            labels = existing_labels
         else:
-            features = new_features
-            labels = new_labels
+            if len(existing_features) > 0 and len(existing_labels) > 0:
+                features = np.vstack((existing_features, new_features))
+                labels = np.concatenate((existing_labels, new_labels))
+            else:
+                features = new_features
+                labels = new_labels
 
-        logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
+            logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
 
         save_features_and_labels(features, labels, features_path, labels_path)
 
@@ -358,9 +591,15 @@ if __name__ == "__main__":
             else:
                 virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
                 new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
-                features = np.vstack((existing_features, new_features))
-                labels = np.concatenate((existing_labels, new_labels))
-                logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
+
+                if len(new_features) == 0 and len(new_labels) == 0:
+                    logging.info("新生成的特征和标签数量为0，跳过合并数据集，直接使用现有数据集开始训练")
+                    features = existing_features
+                    labels = existing_labels
+                else:
+                    features = np.vstack((existing_features, new_features))
+                    labels = np.concatenate((existing_labels, new_labels))
+                    logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
 
                 save_features_and_labels(features, labels, features_path, labels_path)
         else:
