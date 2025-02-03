@@ -22,15 +22,15 @@ from PIL import Image
 from scipy.stats import anderson_ksamp
 import mmap
 from sklearn.feature_selection import SelectKBest, f_classif
-from func_timeout import func_timeout, FunctionTimedOut 
-from sklearn.decomposition import PCA 
+from func_timeout import func_timeout, FunctionTimedOut  # 导入 func_timeout 和 FunctionTimedOut
+from sklearn.decomposition import PCA  # 添加 PCA 导入
 
 # 配置日志记录
 log_file = "train_virus_detector.log"
 logging.basicConfig(
-    level=logging.DEBUG, 
+    level=logging.DEBUG,  # 强制 DEBUG 级别
     format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',  
+    datefmt='%Y-%m-%d %H:%M:%S',  # 统一日志时间格式
     handlers=[
         logging.FileHandler(log_file),
         logging.StreamHandler()
@@ -196,7 +196,8 @@ def _extract_combined_features(file_path):
                 selected_features.append(width)
                 selected_features.append(height)
 
-            expected_length = 2500
+            # 确保所有特征向量长度一致
+            expected_length = 1000  # 根据实际情况调整
             if len(selected_features) < expected_length:
                 selected_features.extend([0] * (expected_length - len(selected_features)))
             elif len(selected_features) > expected_length:
@@ -257,6 +258,7 @@ def extract_pe_features(pe):
     features.append(pe.OPTIONAL_HEADER.MinorImageVersion)
     features.append(pe.OPTIONAL_HEADER.MajorSubsystemVersion)
     features.append(pe.OPTIONAL_HEADER.MinorSubsystemVersion)
+    #features.append(pe.OPTIONAL_HEADER.Win32VersionValue)
     features.append(pe.OPTIONAL_HEADER.SizeOfImage)
     features.append(pe.OPTIONAL_HEADER.SizeOfHeaders)
     features.append(pe.OPTIONAL_HEADER.CheckSum)
@@ -286,7 +288,7 @@ def list_files(directory):
         logging.error(f"枚举文件时发生错误: {e}")
     return file_paths
 
-def create_dataset(virus_dir, benign_dir, batch_size=256, max_workers=256):
+def create_dataset(virus_dir, benign_dir, batch_size=512, max_workers=512):
     if not os.path.exists(virus_dir):
         logging.error(f"病毒样本目录 {virus_dir} 不存在")
         return [], []
@@ -320,7 +322,7 @@ def create_dataset(virus_dir, benign_dir, batch_size=256, max_workers=256):
             results = []
             for future in tqdm(futures, desc="处理批次文件"):
                 try:
-                    results.append(future.result(timeout=60)) 
+                    results.append(future.result(timeout=60))  # 增加超时时间到 60 秒
                 except TimeoutError:
                     logging.error("处理文件超时")
                     results.append((None, None))
@@ -339,7 +341,8 @@ def create_dataset(virus_dir, benign_dir, batch_size=256, max_workers=256):
 
     logging.info(f"数据集生成完成，总病毒样本数: {len(virus_features_all)}，总良性样本数: {len(benign_features_all)}")
 
-    expected_length = 1000
+    # 补0到预期长度
+    expected_length = 1000  # 根据实际情况调整
     virus_features_all = [feature + [0] * (expected_length - len(feature)) if len(feature) < expected_length else feature for feature in virus_features_all]
     benign_features_all = [feature + [0] * (expected_length - len(feature)) if len(feature) < expected_length else feature for feature in benign_features_all]
 
@@ -410,7 +413,7 @@ def compress_features(features, method='PCA', n_components=50):
 
     return compressed_features
 
-# 数据增强
+# 定义数据增强函数
 def augment_data(features, labels):
     logging.info("开始数据增强...")
     try:
@@ -424,15 +427,30 @@ def augment_data(features, labels):
         return features, labels
 
 # 训练模型
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.ensemble import StackingClassifier
+from lightgbm import LGBMClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import roc_curve, classification_report, accuracy_score
+from collections import Counter
+import joblib
+import logging
+
 def train_model(features, labels, initial_model=None, feature_importance_threshold=0.01, min_features=10):
     logging.info(f"数据集大小: {len(features)}")
     logging.info(f"类别分布: {Counter(labels)}")
 
     # 特征预处理
-    features_scaled = StandardScaler().fit_transform(features)
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
 
     # 特征压缩
-    features_compressed = PCA(n_components=0.95).fit_transform(features_scaled)
+    pca = PCA(n_components=0.95)
+    features_compressed = pca.fit_transform(features_scaled)
 
     X_train, X_test, y_train, y_test = train_test_split(features_compressed, labels, test_size=0.2, random_state=42)
 
@@ -513,6 +531,13 @@ def train_model(features, labels, initial_model=None, feature_importance_thresho
         feature_importances = lgbm_model.feature_importances_
         feature_names = np.array([f"feature_{i}" for i in range(X_train.shape[1])])
 
+    # 保存模型、scaler、pca 和 feature_selection
+    joblib.dump(best_estimator, 'model.joblib')
+    joblib.dump(scaler, 'scaler.joblib')
+    joblib.dump(pca, 'pca.joblib')
+    joblib.dump(best_estimator.named_steps['feature_selection'], 'feature_selection.joblib')
+    logging.info("模型、scaler、pca 和 feature_selection 已保存")
+
     return best_estimator, accuracy, y_test, y_pred
 
 # 保存模型
@@ -560,6 +585,7 @@ if __name__ == "__main__":
         virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
         new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
 
+        # 检查新生成的特征和标签数量是否为0
         if len(new_features) == 0 and len(new_labels) == 0:
             logging.info("新生成的特征和标签数量为0，跳过合并数据集，直接使用现有数据集开始训练")
             features = existing_features
@@ -592,6 +618,7 @@ if __name__ == "__main__":
                 virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
                 new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
 
+                # 检查新生成的特征和标签数量是否为0
                 if len(new_features) == 0 and len(new_labels) == 0:
                     logging.info("新生成的特征和标签数量为0，跳过合并数据集，直接使用现有数据集开始训练")
                     features = existing_features
