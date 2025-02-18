@@ -118,7 +118,7 @@ def has_catalog_signature(file_path):
 
 # 示例用法
 if __name__ == "__main__":
-    file_path = "E:\\样本库\\待加入白名单\\白名单3\\conhost.exe"
+    file_path = "C:\\windows\\explorer.exe"
     try:
         if has_catalog_signature(file_path):
             print(f"文件 {file_path} 具有目录签名")

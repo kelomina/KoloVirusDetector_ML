@@ -53,20 +53,38 @@ import torch
 import pandas as pd
 import hashlib  # 添加导入hashlib模块
 from CryptCAT import (
-    has_catalog_signature,
-    is_pe_file,
-    get_pe_characteristics,
-    get_cert_info,
-    check_section_entropy,
-    has_debug_info,
-    has_tls_callbacks,
-    check_imports_suspicious
+    has_catalog_signature
 )
 plt.switch_backend('agg')
 os.environ['LIGHTGBM_GPU_USE_DOUBLE'] = 'false' 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'     
 cpu_cores = os.cpu_count()
 max_workers = max(1, int(cpu_cores * 0.8))
+
+
+
+
+
+
+
+
+
+
+
+
+#代码尚且不能运行,这是暂存的版本
+
+
+
+
+
+
+
+
+
+
+
+
 
 # 配置日志
 log_file = "train_virus_detector.log"
@@ -146,19 +164,19 @@ def _extract_combined_features(file_path):
             if text_section and text_section.Name.rstrip(b'\x00').decode('utf-8') != '.text':
                 text_section_renamed = 1
 
-        # 目录签名验证（白名单优先）
-        try:
-            if has_catalog_signature(file_path):
-                logging.info(f"文件 {file_path} 具有可信目录签名，跳过详细分析")
+            # 目录签名验证（白名单优先）
+            try:
+                if has_catalog_signature(file_path):
+                    logging.info(f"文件 {file_path} 具有可信目录签名，跳过详细分析")
                 return [1.0] * 1000  # 返回全1特征向量表示可信文件
-        except Exception as e:
-            logging.warning(f"目录签名验证失败: {e}")
+            except Exception as e:
+                logging.warning(f"目录签名验证失败: {e}")
 
-            data_section = next((section for section in pe.sections if section.Name.rstrip(b'\x00').decode('utf-8') == '.data'), None)
-            data_section_size = data_section.Misc_VirtualSize if data_section else 0
-            icon_data = []
-            icon_color_histograms = []
-            icon_dimensions = []
+                data_section = next((section for section in pe.sections if section.Name.rstrip(b'\x00').decode('utf-8') == '.data'), None)
+                data_section_size = data_section.Misc_VirtualSize if data_section else 0
+                icon_data = []
+                icon_color_histograms = []
+                icon_dimensions = []
             if hasattr(pe, 'DIRECTORY_ENTRY_RESOURCE'):
                 for resource_type in pe.DIRECTORY_ENTRY_RESOURCE.entries:
                     if resource_type.name == pefile.RESOURCE_TYPE['RT_GROUP_ICON']:
@@ -199,8 +217,8 @@ def _extract_combined_features(file_path):
             import_table_features = ','.join([f"{lib}_{func}" for lib, funcs in import_table_info for func in funcs])
             export_table_features = ','.join([f"{name}_{ordinal}" for name, ordinal in export_table_info])
 
-        # 提取数字签名特征
-        signature_features = extract_signature_features(pe)
+            # 提取数字签名特征
+            signature_features = extract_signature_features(pe)
 
             selected_features = [
                 entropy,
