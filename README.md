@@ -33,12 +33,14 @@
 - Windows/Linux
 - 推荐配置：
   - CPU: 4核以上
+  - GPU：RTX690或以上（Nvidia显卡优先）
   - 内存: 16GB+
   - 存储: SSD优先
 
 ## 快速开始
 
 ### 安装依赖
+CUDA12.8[https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe]
 ```bash
 pip install -r requirements.txt
 ```
@@ -97,6 +99,7 @@ python train.py --config config.json --mode fine_tune
    - 特征标准化预处理
 
 3. 性能优化：
+   - 使用CUDA进行训练加速
    - 使用内存映射文件加速读取
    - 支持多进程并行特征提取
    - 自动跳过无效文件
