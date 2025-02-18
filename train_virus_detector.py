@@ -673,7 +673,7 @@ def train_model(features, labels):
     X_test_df = pd.DataFrame(X_test, columns=feature_names)
     
     # 模型评估
-    y_pred = model.predict(X_new_df)
+    y_prob = best_model.predict_proba(X_test_df)[:, 1]
     y_pred = (y_prob >= 0.5).astype(int)
     eval_results = enhanced_evaluation(y_test, y_prob, y_pred)
     
