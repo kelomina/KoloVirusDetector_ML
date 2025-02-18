@@ -51,6 +51,17 @@ import logging
 import matplotlib.pyplot as plt
 import torch
 import pandas as pd
+import hashlib  # 添加导入hashlib模块
+from CryptCAT import (
+    has_catalog_signature,
+    is_pe_file,
+    get_pe_characteristics,
+    get_cert_info,
+    check_section_entropy,
+    has_debug_info,
+    has_tls_callbacks,
+    check_imports_suspicious
+)
 plt.switch_backend('agg')
 os.environ['LIGHTGBM_GPU_USE_DOUBLE'] = 'false' 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'     
@@ -96,7 +107,7 @@ def _extract_combined_features(file_path):
             file_data = np.frombuffer(mmapped_data, dtype=np.uint8)
 
         if len(file_data) < 64:
-            logging.warning(f"文件 {file_path} 太小，不是有效的 PE 文件")
+            logging.warning(f"文件 {file_path} 太小,不是有效的 PE 文件")
             return None
 
         dos_header = file_data[:2].tobytes()
@@ -134,6 +145,14 @@ def _extract_combined_features(file_path):
             text_section_renamed = 0
             if text_section and text_section.Name.rstrip(b'\x00').decode('utf-8') != '.text':
                 text_section_renamed = 1
+
+        # 目录签名验证（白名单优先）
+        try:
+            if has_catalog_signature(file_path):
+                logging.info(f"文件 {file_path} 具有可信目录签名，跳过详细分析")
+                return [1.0] * 1000  # 返回全1特征向量表示可信文件
+        except Exception as e:
+            logging.warning(f"目录签名验证失败: {e}")
 
             data_section = next((section for section in pe.sections if section.Name.rstrip(b'\x00').decode('utf-8') == '.data'), None)
             data_section_size = data_section.Misc_VirtualSize if data_section else 0
@@ -180,13 +199,17 @@ def _extract_combined_features(file_path):
             import_table_features = ','.join([f"{lib}_{func}" for lib, funcs in import_table_info for func in funcs])
             export_table_features = ','.join([f"{name}_{ordinal}" for name, ordinal in export_table_info])
 
+        # 提取数字签名特征
+        signature_features = extract_signature_features(pe)
+
             selected_features = [
                 entropy,
                 text_section_entropy,
                 data_section_size,
                 *pe_features,
                 *file_description_bytes, *file_version_bytes, *product_name_bytes, *product_version_bytes, *legal_copyright_bytes,
-                text_section_renamed
+                text_section_renamed,
+                *signature_features  # 添加数字签名特征
             ]
 
             for color_count in icon_color_histograms:
@@ -211,6 +234,19 @@ def _extract_combined_features(file_path):
     except Exception as e:
         logging.error(f"无法读取文件 {file_path}: {e}")
         return None
+
+def extract_signature_features(pe):
+    """提取PE文件的数字签名特征"""
+    signature_features = []
+    try:
+        if hasattr(pe, 'DIRECTORY_ENTRY_SECURITY'):
+            for security_entry in pe.DIRECTORY_ENTRY_SECURITY:
+                signature_data = pe.write()[security_entry.VirtualAddress:security_entry.VirtualAddress + security_entry.Size]
+                sha256_hash = hashlib.sha256(signature_data).hexdigest()
+                signature_features.append(int(sha256_hash, 16) % (10 ** 8))  # 取SHA256哈希值的前8位作为特征
+    except Exception as e:
+        logging.warning(f"提取数字签名特征时发生错误: {e}")
+    return signature_features
 
 def get_pe_string(pe, string_name):
     if hasattr(pe, 'VS_FIXEDFILEINFO'):
@@ -314,7 +350,7 @@ def create_dataset(virus_dir, benign_dir, batch_size=None, max_workers=max_worke
     """
     if not os.path.exists(virus_dir):
         logging.error(f"病毒样本目录 {virus_dir} 不存在")
-        return [], []
+        return [], []       
     if not os.path.exists(benign_dir):
         logging.error(f"良性样本目录 {benign_dir} 不存在")
         return [], []
