@@ -49,6 +49,8 @@ from collections import Counter
 import joblib
 import logging
 import matplotlib.pyplot as plt
+import torch
+import pandas as pd
 plt.switch_backend('agg')
 os.environ['LIGHTGBM_GPU_USE_DOUBLE'] = 'false' 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'     
@@ -125,19 +127,6 @@ def _extract_combined_features(file_path):
             product_version = get_pe_string(pe, 'ProductVersion')
             legal_copyright = get_pe_string(pe, 'LegalCopyright')
 
-            has_digital_signature = 0
-            has_directory_signature = 0
-            if hasattr(pe, 'DIRECTORY_ENTRY_SECURITY'):
-                has_directory_signature = 1
-                if pe.DIRECTORY_ENTRY_SECURITY:
-                    has_digital_signature = 1
-            digital_signature_valid = 0
-            if has_digital_signature:
-                try:
-                    if pe.verify_signature():
-                        digital_signature_valid = 1
-                except Exception as e:
-                    logging.warning(f"文件 {file_path} 数字签名验证失败: {e}")
             text_section = next((section for section in pe.sections if section.Name.rstrip(b'\x00').decode('utf-8') == '.text'), None)
             text_section_content = text_section.get_data() if text_section else b''
             text_section_entropy = calculate_entropy(text_section_content) if text_section else 0
@@ -197,7 +186,7 @@ def _extract_combined_features(file_path):
                 data_section_size,
                 *pe_features,
                 *file_description_bytes, *file_version_bytes, *product_name_bytes, *product_version_bytes, *legal_copyright_bytes,
-                has_digital_signature, has_directory_signature, digital_signature_valid, text_section_renamed
+                text_section_renamed
             ]
 
             for color_count in icon_color_histograms:
@@ -206,7 +195,7 @@ def _extract_combined_features(file_path):
                 selected_features.append(width)
                 selected_features.append(height)
 
-            expected_length = 5000
+            expected_length = 1000
             if len(selected_features) < expected_length:
                 selected_features.extend([0] * (expected_length - len(selected_features)))
             elif len(selected_features) > expected_length:
@@ -319,7 +308,7 @@ def create_dataset(virus_dir, benign_dir, batch_size=None, max_workers=max_worke
     创建训练数据集
     特征处理：
     - 多进程并行处理
-    - 自动填充特征到5000维
+    - 自动填充特征到1000维
     - 超时处理（15秒/文件）
     - 错误文件自动跳过
     """
@@ -384,12 +373,12 @@ def create_dataset(virus_dir, benign_dir, batch_size=None, max_workers=max_worke
 
     logging.info(f"数据集生成完成，总病毒样本数: {len(virus_features_all)}，总良性样本数: {len(benign_features_all)}")
 
-    expected_length = 5000
+    expected_length = 1000
     virus_features_all = [feature + [0] * (expected_length - len(feature)) if len(feature) < expected_length else feature for feature in virus_features_all]
     benign_features_all = [feature + [0] * (expected_length - len(feature)) if len(feature) < expected_length else feature for feature in benign_features_all]
 
     def validate_features(feature_list):
-        return [f + [0]*(5000-len(f)) if len(f)<5000 else f[:5000] 
+        return [f + [0]*(1000-len(f)) if len(f)<1000 else f[:1000] 
                 for f in feature_list]
 
     virus_features_all = validate_features(virus_features_all)
@@ -424,7 +413,7 @@ def create_optimized_model_pipeline():
         'objective': 'binary',
         'metric': 'aucpr',
         'boosting_type': 'goss',
-        'device': 'gpu',
+        'device': device,
         'early_stopping_round': None,
         'verbosity': -1
     }
@@ -434,7 +423,7 @@ def create_optimized_model_pipeline():
         'max_depth': 7,
         'learning_rate': 0.05,
         'tree_method': 'hist',
-        'device': 'cuda:0',
+        'device': device,
         'subsample': 0.8,
         'colsample_bytree': 0.7,
         'gamma': 0.2
@@ -445,7 +434,7 @@ def create_optimized_model_pipeline():
         'dual': False,
         'C': 0.5,
         'class_weight': 'balanced',
-        'max_iter': 5000
+        'max_iter': 1000
     }
 
     # 最终评估器
@@ -456,7 +445,7 @@ def create_optimized_model_pipeline():
         categorical_features=None
     )
 
-     # 分离特征工程和模型训练
+    # 分离特征工程和模型训练
     feature_pipeline = create_advanced_feature_pipeline()
     
     return Pipeline([
@@ -521,12 +510,12 @@ def merge_features_and_labels(virus_features, benign_features):
     labels = [1] * len(virus_features) + [0] * len(benign_features)
     
     if len(features) == 0:
-        return np.empty((0, 5000)), np.empty(0)
+        return np.empty((0, 1000)), np.empty(0)
     
     features_array = np.array(features)
-    if features_array.shape[1] != 5000:
+    if features_array.shape[1] != 1000:
         features_array = np.pad(features_array, 
-                              ((0,0), (0,5000 - features_array.shape[1])), 
+                              ((0,0), (0,1000 - features_array.shape[1])), 
                               mode='constant')
     
     logging.info(f"特征和标签合并完成，总样本数: {len(features)}")
@@ -579,21 +568,35 @@ def augment_data(features, labels):
         return features, labels
 
 
+# 保存特征名称
+def save_feature_names(features, path):
+    feature_names = [f'feature_{i}' for i in range(features.shape[1])]
+    with open(path, 'w') as f:
+        json.dump(feature_names, f)
+    logging.info(f"特征名称已保存到 {path}")
+
+# 加载特征名称
+def load_feature_names(path):
+    with open(path, 'r') as f:
+        feature_names = json.load(f)
+    logging.info(f"特征名称已从 {path} 加载")
+    return feature_names
+
 
 def incremental_training(existing_features, existing_labels, new_features, new_labels):
     """增强型增量训练（修复版本）"""
     # 转换为numpy数组
-    existing_features = np.array(existing_features) if existing_features is not None else np.empty((0, 5000))
+    existing_features = np.array(existing_features) if existing_features is not None else np.empty((0, 1000))
     existing_labels = np.array(existing_labels) if existing_labels is not None else np.empty(0)
     new_features = np.array(new_features)
     new_labels = np.array(new_labels)
     
     # 维度验证和调整
     def adjust_dimensions(features):
-        if features.shape[1] < 5000:
-            return np.pad(features, ((0,0), (0,5000 - features.shape[1])), mode='constant')
-        elif features.shape[1] > 5000:
-            return features[:, :5000]
+        if features.shape[1] < 1000:
+            return np.pad(features, ((0,0), (0,1000 - features.shape[1])), mode='constant')
+        elif features.shape[1] > 1000:
+            return features[:, :1000]
         return features
     
     # 调整所有特征的维度
@@ -622,7 +625,7 @@ def incremental_training(existing_features, existing_labels, new_features, new_l
     else:
         sample_weights = np.empty(0)
     
-    assert features.shape[1] == 5000, f"特征维度错误，应为5000维，实际得到{features.shape[1]}维"
+    assert features.shape[1] == 1000, f"特征维度错误，应为1000维，实际得到{features.shape[1]}维"
     assert len(features) == len(labels), "特征和标签数量不匹配"
     return features, labels
 
@@ -645,9 +648,8 @@ def train_model(features, labels):
         'classifier__xgb__gamma': Real(0, 0.5),
         'feature_engineering__pca__n_components': Real(0.7, 0.95),
         'feature_engineering__mutual_info__k': Integer(300, 800)
-        }
+    }
 
-    
     # 创建优化器
     optimizer = BayesSearchCV(
         estimator=create_optimized_model_pipeline(),
@@ -664,8 +666,14 @@ def train_model(features, labels):
     optimizer.fit(X_train, y_train)
     best_model = optimizer.best_estimator_
     
+    # 加载特征名称
+    feature_names = load_feature_names('feature_names.json')
+    
+    # 将测试数据转换为 DataFrame
+    X_test_df = pd.DataFrame(X_test, columns=feature_names)
+    
     # 模型评估
-    y_prob = best_model.predict_proba(X_test)[:, 1]
+    y_pred = model.predict(X_new_df)
     y_pred = (y_prob >= 0.5).astype(int)
     eval_results = enhanced_evaluation(y_test, y_prob, y_pred)
     
@@ -701,7 +709,14 @@ if __name__ == "__main__":
         except json.JSONDecodeError as e:
             logging.error(f"配置文件格式错误: {e}")
             exit(1)
-
+    # 检查是否有可用的Nvidia GPU
+    if torch.cuda.is_available():
+        device = 'cuda'
+        logging.info("检测到Nvidia GPU，使用GPU进行训练")
+    else:
+        device = 'cpu'
+        logging.info("未检测到Nvidia GPU，使用CPU进行训练")
+    
     virus_samples_dir = config.get("virus_samples_dir", "E:\\样本库\\待拉黑")
     benign_samples_dir = config.get("benign_samples_dir", "E:\\样本库\\待加入白名单")
     features_path = config.get("features_path", "features.npy")
@@ -713,7 +728,7 @@ if __name__ == "__main__":
         logging.info("增量训练模式")
         existing_features, existing_labels = load_features_and_labels(features_path, labels_path)
         if existing_features is None:
-            existing_features = np.empty((0, 5000))
+            existing_features = np.empty((0, 1000))
             existing_labels = np.empty(0)
         else:
             existing_features = np.array(existing_features)
@@ -722,7 +737,7 @@ if __name__ == "__main__":
     # 生成新数据集
         virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
         new_features, new_labels = merge_features_and_labels(virus_features, benign_features)
-        new_features = np.array(new_features) if len(new_features) > 0 else np.empty((0, 5000))
+        new_features = np.array(new_features) if len(new_features) > 0 else np.empty((0, 1000))
         new_labels = np.array(new_labels) if len(new_labels) > 0 else np.empty(0)
     
     # 执行增强型增量训练
@@ -733,6 +748,7 @@ if __name__ == "__main__":
     
         if features.size > 0 and labels.size > 0:
             save_features_and_labels(features, labels, features_path, labels_path)
+            save_feature_names(features, 'feature_names.json')
             logging.info(f"合并后数据集尺寸: 特征{features.shape}, 标签{labels.shape}")
 
 
@@ -746,9 +762,10 @@ if __name__ == "__main__":
         
         pr_fig = eval_results['pr_curve'].figure_
         pr_fig.savefig('precision_recall_curve.png')
-        
-        cm_fig = eval_results['confusion_matrix'].figure_
-        cm_fig.savefig('confusion_matrix.png')
+
+        cm_display = eval_results['confusion_matrix']
+        cm_display.plot()
+        cm_display.figure_.savefig('confusion_matrix.png')  
         
     else:
         logging.info("微调模式")
@@ -773,14 +790,18 @@ if __name__ == "__main__":
                     logging.info(f"新生成的特征和标签已合并到现有数据集中，总样本数: {len(features)}")
 
                 save_features_and_labels(features, labels, features_path, labels_path)
+                save_feature_names(features, 'feature_names.json')
         else:
             virus_features, benign_features = create_dataset(virus_samples_dir, benign_samples_dir)
             features, labels = merge_features_and_labels(virus_features, benign_features)
 
             save_features_and_labels(features, labels, features_path, labels_path)
+            save_feature_names(features, 'feature_names.json')
 
         features, labels = augment_data(features, labels)
         initial_model = joblib.load(model_output_path)
+        with open('feature_names.json', 'r') as f:
+            feature_names = json.load(f)
         model, accuracy, y_test, y_pred = train_model(features, labels, initial_model)
         save_model(model, model_output_path)
 
