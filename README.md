@@ -40,7 +40,7 @@
 ## 快速开始
 
 ### 安装依赖
-CUDA12.8[https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe]
+CUDA12.8(非Nvidia的GPU勿装)[https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe]
 ```bash
 pip install -r requirements.txt
 ```
