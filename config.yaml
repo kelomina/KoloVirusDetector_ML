@@ -18,7 +18,7 @@ random_state: 42   # 随机种子
 top_features: 500  # 互信息特征选择保留的特征数量
 
 # 模型训练参数
-n_estimators: 1000         # 最大树数量
+n_estimators: 2000         # 最大树数量
 early_stopping_rounds: 50  # 早停轮数
 
 # 是否进行参数优化
@@ -28,10 +28,16 @@ n_trials: 100          # 优化试验次数
 # LightGBM参数
 lgb_params:
   objective: "binary"
-  metric: "auc"
-  boosting_type: "gbdt"
-  num_leaves: 31
+  metric: "binary_logloss"
+  boosting_type: "goss"
+  num_leaves: 127
+  max_depth: -1
   learning_rate: 0.05
+  subsample_for_bin: 50000
+  min_child_samples: 5
+  reg_alpha: 0.1
+  reg_lambda: 0.3
+  class_weight: {0: 1, 1: 3}
   feature_fraction: 0.9
   bagging_fraction: 0.8
   bagging_freq: 5
