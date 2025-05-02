@@ -1,0 +1,38 @@
+# 恶意软件检测模型配置文件
+
+# 输出目录
+output_dir: "output"
+
+# 数据集路径
+benign_dir: "data/benign"     # 良性样本目录
+malware_dir: "data/malware"   # 恶意样本目录
+
+# 如果已有处理好的特征文件，可以直接使用
+features_path: ""  # 留空表示从原始文件提取特征
+
+# 数据处理参数
+sample_limit: 1000  # 每类样本的最大数量限制，留空表示使用所有样本
+n_jobs: 4          # 并行处理线程数
+test_size: 0.2     # 测试集比例
+random_state: 42   # 随机种子
+top_features: 500  # 互信息特征选择保留的特征数量
+
+# 模型训练参数
+n_estimators: 1000         # 最大树数量
+early_stopping_rounds: 50  # 早停轮数
+
+# 是否进行参数优化
+optimize_params: true  # 是否进行超参数优化
+n_trials: 100          # 优化试验次数
+
+# LightGBM参数
+lgb_params:
+  objective: "binary"
+  metric: "auc"
+  boosting_type: "gbdt"
+  num_leaves: 31
+  learning_rate: 0.05
+  feature_fraction: 0.9
+  bagging_fraction: 0.8
+  bagging_freq: 5
+  verbose: -1 
