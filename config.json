@@ -1,7 +1,0 @@
-{
-    "virus_samples_dir": "choose your virus files dir",
-    "benign_samples_dir": "choose your white files dir",
-    "features_path": "features.npy",
-    "labels_path": "labels.npy",
-    "model_path": "ML.pkl"
-}
